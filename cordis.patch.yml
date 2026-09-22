@@ -1,0 +1,4 @@
+# dsh-composer-enhance bundle layer: one Loader row for the composer prompt enhancer.
+- insert:
+    - id: composer-enhance
+      name: 'dsh-composer-enhance'
