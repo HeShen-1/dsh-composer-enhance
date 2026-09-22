@@ -15,10 +15,15 @@
  * see why the text moved (the OpenAI cookbook optimizer's checker agents), and
  * the draft treated as data rather than instructions (linshenkx/prompt-optimizer).
  *
- * This file imports nothing. Every DSH capability arrives as a service on `ctx`,
- * which is what keeps the plugin installable from a git address with no
- * hand-built symlinks into the DSH install.
+ * The host half imports no DSH-internal package: every capability arrives as a
+ * service on `ctx`, and the only imports are Node builtins. That is what keeps
+ * the plugin installable from a git address without hand-built symlinks into the
+ * DSH install.
  */
+
+/** Exact route the composer button posts to. */
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 /** Exact route the composer button posts to. */
 const ROUTE = "/dsh-composer-enhance/enhance";
@@ -37,6 +42,15 @@ const SLOW_EFFORT = "max";
 
 /** Bound on one model call. */
 const DEFAULT_TIMEOUT_MS = 60_000;
+
+/**
+ * Build marker echoed on every successful response.
+ *
+ * The host half's equivalent of a page-visible build stamp: when a change appears
+ * to do nothing, this says whether the host answering the page is the build you
+ * think it is.
+ */
+const ENGINE = "0.2.0-m2";
 
 /** Caps mirrored by docs/protocol.md; the client enforces the same numbers. */
 const MAX_QUESTIONS = 3;
@@ -122,10 +136,11 @@ interface PluginConfig {
 	gatePrompt: string;
 	rewritePrompt: string;
 	slowPrompt: string;
+	recentTurns: number;
 }
 
 /** Defaults for every config field; an absent or partial config is valid. */
-const CONFIG_DEFAULTS: PluginConfig = {
+export const CONFIG_DEFAULTS: PluginConfig = {
 	provider: "",
 	model: "",
 	fastEffort: FAST_EFFORT,
@@ -134,7 +149,8 @@ const CONFIG_DEFAULTS: PluginConfig = {
 	maxTokens: 4096,
 	gatePrompt: "",
 	rewritePrompt: "",
-	slowPrompt: ""
+	slowPrompt: "",
+	recentTurns: 8
 };
 
 /** Mutable holder so a recomposition can swap config under a live route. */
@@ -162,7 +178,8 @@ function readConfig(raw: unknown): PluginConfig {
 		maxTokens: count("maxTokens", CONFIG_DEFAULTS.maxTokens),
 		gatePrompt: text("gatePrompt", ""),
 		rewritePrompt: text("rewritePrompt", ""),
-		slowPrompt: text("slowPrompt", "")
+		slowPrompt: text("slowPrompt", ""),
+		recentTurns: count("recentTurns", CONFIG_DEFAULTS.recentTurns)
 	};
 }
 
@@ -502,6 +519,93 @@ export async function collectGrounding(ctx: PluginContext): Promise<{ text: stri
 	return { text: parts.join("\n\n"), used };
 }
 
+/** Files read for project conventions, in priority order. */
+const PROJECT_MEMORY_FILES: readonly string[] = ["AGENTS.md", "CLAUDE.md"];
+
+/** Extract the text of one message payload, tolerating either event shape. */
+function messageText(message: unknown): string {
+	if (message === null || typeof message !== "object") return "";
+	const record = message as { content?: unknown; text?: unknown };
+	if (!Array.isArray(record.content)) return str(record.text);
+	return record.content
+		.filter((block) => block !== null && typeof block === "object" && str((block as { type?: unknown }).type) === "text")
+		.map((block) => str((block as { text?: unknown }).text))
+		.filter((text) => text !== "")
+		.join("\n");
+}
+
+/**
+ * Collect the session's own context: the last few conversational turns and the
+ * project instruction files at the session's working directory.
+ *
+ * Both come from the session query service rather than from a scoped system-prompt
+ * assembly: an assembly without a scope key only runs global providers, so the
+ * session-scoped `instructions` section never appears in it. `session.cwd` is the
+ * authoritative working directory and the instruction files are plain files.
+ * @param ctx - plugin context.
+ * @param sessionId - session to read.
+ * @param recentTurns - how many trailing turns to include.
+ * @returns the grounding text plus the names of the sources that contributed.
+ */
+export async function collectSessionGrounding(
+	ctx: PluginContext,
+	sessionId: string,
+	recentTurns: number
+): Promise<{ text: string; used: string[] }> {
+	const used: string[] = [];
+	const parts: string[] = [];
+	if (sessionId === "") return { text: "", used };
+	const query = ctx.get("sessionQuery") as {
+		readSurface?: (id: string) => Promise<{ session?: { cwd?: unknown }; events?: unknown[] }>;
+	} | undefined;
+	if (query === undefined || query === null || typeof query.readSurface !== "function") return { text: "", used };
+
+	let snapshot: { session?: { cwd?: unknown }; events?: unknown[] } | undefined;
+	try {
+		snapshot = await query.readSurface(sessionId);
+	} catch (error) {
+		ctx.logger?.warn?.(`[dsh-composer-enhance] readSurface failed: ${String(error)}`);
+		return { text: "", used };
+	}
+
+	// --- recent turns -------------------------------------------------------
+	const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+	const turns: string[] = [];
+	for (const event of events) {
+		if (event === null || typeof event !== "object") continue;
+		const row = event as { type?: unknown; message?: unknown; data?: unknown };
+		const type = str(row.type);
+		if (type !== "user/message" && type !== "assistant/message") continue;
+		const nested = row.data !== null && typeof row.data === "object" ? (row.data as { message?: unknown }).message : undefined;
+		const text = messageText(row.message ?? nested);
+		if (text === "") continue;
+		turns.push(`${type === "user/message" ? "用户" : "助手"}：${text}`);
+	}
+	if (turns.length > 0) {
+		parts.push(`【最近的对话】\n${turns.slice(-recentTurns).join("\n\n").slice(0, GROUNDING_SECTION_CHARS)}`);
+		used.push("recentTurns");
+	}
+
+	// --- project instructions ----------------------------------------------
+	const cwd = typeof snapshot?.session?.cwd === "string" ? snapshot.session.cwd : "";
+	if (cwd !== "") {
+		for (const name of PROJECT_MEMORY_FILES) {
+			try {
+				const content = await readFile(join(cwd, name), "utf8");
+				if (content.trim() !== "") {
+					parts.push(`【项目约定（${name}）】\n${content.slice(0, GROUNDING_SECTION_CHARS)}`);
+					used.push("projectMemory");
+					break;
+				}
+			} catch {
+				/* absent or unreadable: try the next candidate */
+			}
+		}
+	}
+
+	return { text: parts.join("\n\n"), used };
+}
+
 // ---------------------------------------------------------------------------
 // Route resolution
 // ---------------------------------------------------------------------------
@@ -628,7 +732,7 @@ function frameAnswers(questions: unknown, answers: unknown): string {
 	return `\n\n【用户对澄清问题的回答】\n${lines.join("\n")}`;
 }
 
-function createHandler(ctx: PluginContext, state: ConfigState): RouteHandler {
+export function createHandler(ctx: PluginContext, state: ConfigState): RouteHandler {
 	return async (req, res) => {
 		try {
 			const config = state.config;
@@ -648,7 +752,10 @@ function createHandler(ctx: PluginContext, state: ConfigState): RouteHandler {
 			}
 
 			const grounding = await collectGrounding(ctx);
-			const preamble = grounding.text === "" ? "" : `${GROUNDING_NOTE}\n\n${grounding.text}\n\n---\n\n`;
+			const sessionGrounding = await collectSessionGrounding(ctx, sessionId, config.recentTurns);
+			const groundingText = [grounding.text, sessionGrounding.text].filter((part) => part !== "").join("\n\n");
+			const contextUsed = [...grounding.used, ...sessionGrounding.used];
+			const preamble = groundingText === "" ? "" : `${GROUNDING_NOTE}\n\n${groundingText}\n\n---\n\n`;
 
 			// --- slow stage: review a result that already landed ------------------
 			if (stage === "slow") {
@@ -660,19 +767,30 @@ function createHandler(ctx: PluginContext, state: ConfigState): RouteHandler {
 				}
 				sendJson(res, 200, {
 					ok: true,
+					engine: ENGINE,
 					stage,
 					draft: rewritten.draft,
 					issues: rewritten.issues,
 					assumptions: rewritten.assumptions,
-					contextUsed: grounding.used,
+					contextUsed,
 					route: { provider: route.provider, model: route.model, reasoningEffort: route.reasoningEffort }
 				});
 				return;
 			}
 
 			// --- fast stage, first pass: gate ------------------------------------
+			//
+			// "Answered" is decided by the ANSWERS, not by the questions. A chips
+			// reply carries `questions: []` plus a non-empty `answers`, so deriving
+			// this from `questions.length` alone would re-gate a chips click forever
+			// and the user could never get past it. (Reported from the live page; the
+			// dead `answering && questions.length === 0` branch below was the tell.)
 			const questions = Array.isArray(body.questions) ? body.questions : [];
-			const answering = questions.length > 0;
+			const answers = body.answers !== null && typeof body.answers === "object"
+				? body.answers as Record<string, unknown>
+				: {};
+			const chosen = Object.values(answers).flat().map(str).filter((value) => value !== "");
+			const answering = questions.length > 0 || chosen.length > 0;
 			let gate = normalizeGate(undefined);
 
 			if (!answering) {
@@ -685,18 +803,21 @@ function createHandler(ctx: PluginContext, state: ConfigState): RouteHandler {
 			if (gate.shape !== "none" && !answering) {
 				sendJson(res, 200, {
 					ok: true,
+					engine: ENGINE,
 					stage,
 					gate,
-					contextUsed: grounding.used,
+					contextUsed,
 					route: { provider: route.provider, model: route.model, reasoningEffort: route.reasoningEffort }
 				});
 				return;
 			}
 
 			// --- fast stage, second pass: rewrite --------------------------------
-			const answersBlock = frameAnswers(questions, body.answers);
-			const chipBlock = answering && questions.length === 0 && typeof body.answers === "object" && body.answers !== null
-				? `\n\n【用户的选择】\n${Object.values(body.answers as Record<string, unknown>).flat().map(str).filter((value) => value !== "").join("、")}`
+			// A chips reply has no question rows to frame, so its choices are passed
+			// as a bare selection list instead.
+			const answersBlock = frameAnswers(questions, answers);
+			const chipBlock = questions.length === 0 && chosen.length > 0
+				? `\n\n【用户的选择】\n${chosen.join("、")}`
 				: "";
 			const output = await runModel(
 				ctx,
@@ -714,12 +835,13 @@ function createHandler(ctx: PluginContext, state: ConfigState): RouteHandler {
 			}
 			sendJson(res, 200, {
 				ok: true,
+				engine: ENGINE,
 				stage,
 				gate: answering ? undefined : gate,
 				draft: rewritten.draft,
 				issues: rewritten.issues,
 				assumptions: rewritten.assumptions,
-				contextUsed: grounding.used,
+				contextUsed,
 				route: { provider: route.provider, model: route.model, reasoningEffort: route.reasoningEffort }
 			});
 		} catch (error) {
