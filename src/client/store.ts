@@ -20,6 +20,7 @@ import {
 	CHIPS_ANSWER_KEY,
 	MAX_GATE_ROUNDS,
 	ROUTE,
+	SLOW_WINDOW_MS,
 	chipQuestionEcho,
 	normalizeAssumptions,
 	normalizeChips,
@@ -45,6 +46,9 @@ export interface DraftFacts {
 /** Where the flow currently stands. */
 export type FlowStatus = "idle" | "gating" | "writing" | "chips" | "panel" | "done" | "failed";
 
+/** Where the slow review stands. */
+export type SlowPhase = "none" | "running" | "offered" | "applied";
+
 /** Everything both slot components render from. */
 export interface FlowState {
 	status: FlowStatus;
@@ -69,6 +73,20 @@ export interface FlowState {
 	/** Gate rounds already spent; bounds a host that never returns a draft. */
 	rounds: number;
 	facts: DraftFacts;
+
+	/** Slow review: no run, in flight, waiting on a click, or already applied. */
+	slowPhase: SlowPhase;
+	/** The fast result, kept so "restore the fast version" has a target. */
+	fastDraft: string | null;
+	/** Change list of the fast result, restored when the slow pass is undone. */
+	fastIssues: Issue[];
+	fastAssumptions: string[];
+	/** The slower text, held for the offer line's replace button. */
+	slowDraft: string | null;
+	slowIssues: Issue[];
+	slowAssumptions: string[];
+	/** How many changes the slower version reports; drives the offer line. */
+	slowCount: number;
 }
 
 /** The composer actions a slot component receives. */
@@ -99,11 +117,48 @@ export interface FlowStore {
 	cancel(): void;
 	dismiss(): void;
 	restore(): void;
+	/** Take the slower version the offer line holds. */
+	applySlow(): void;
+	/** Put the fast result back after a slow replacement. */
+	restoreFast(): void;
+	/** Hide the offer line without touching the draft. */
+	dismissSlowOffer(): void;
 	sync(facts: DraftFacts): void;
 }
 
 /** Empty draft facts, used before the first sync. */
 const NO_FACTS: DraftFacts = { draft: "", draftRev: 0, phase: "plain", refCount: 0, attachmentCount: 0 };
+
+/** The slow review's fields at rest, so one patch can clear all of them. */
+const NO_SLOW: Pick<
+	FlowState,
+	"slowPhase" | "fastDraft" | "fastIssues" | "fastAssumptions" | "slowDraft" | "slowIssues" | "slowAssumptions" | "slowCount"
+> = {
+	slowPhase: "none",
+	fastDraft: null,
+	fastIssues: [],
+	fastAssumptions: [],
+	slowDraft: null,
+	slowIssues: [],
+	slowAssumptions: [],
+	slowCount: 0
+};
+
+/**
+ * Whether the composer's editor currently owns focus.
+ *
+ * The slow pass only replaces the draft by itself while the user is still in the
+ * editor; a page where focus moved elsewhere gets the offer line instead. The
+ * editor is a contenteditable, and the active element may be a descendant.
+ * @returns whether focus is inside a contenteditable element.
+ */
+function editorHasFocus(): boolean {
+	if (typeof document === "undefined") return false;
+	const active: Element | null = document.activeElement;
+	if (active === null) return false;
+	if (active instanceof HTMLElement && active.isContentEditable) return true;
+	return active.closest('[contenteditable="true"]') !== null;
+}
 
 /**
  * Build one Session's store.
@@ -114,6 +169,8 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 	let scope: SessionScope = { sessionId };
 	let listeners: Array<() => void> = [];
 	let inFlight: AbortController | null = null;
+	/** The slow review's own handle: it must never cancel the fast request. */
+	let slowInFlight: AbortController | null = null;
 	let noticeTimer: ReturnType<typeof setTimeout> | null = null;
 
 	const state: FlowState = {
@@ -132,7 +189,8 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		errorCode: "",
 		errorMessage: "",
 		rounds: 0,
-		facts: NO_FACTS
+		facts: NO_FACTS,
+		...NO_SLOW
 	};
 
 	// React compares successive getSnapshot() results with Object.is, so the
@@ -184,10 +242,37 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		}
 	};
 
+	/**
+	 * Drop the slow review. Every path that invalidates it — a user edit, the
+	 * result bar closing, either restore button, an unmount — goes through here,
+	 * and an aborted slow pass never reports anything afterwards.
+	 */
+	const abortSlow = (): void => {
+		const controller = slowInFlight;
+		slowInFlight = null;
+		if (controller === null) return;
+		try {
+			controller.abort();
+		} catch {
+			/* already settled */
+		}
+	};
+
 	/** Write the draft through the composer, exactly once per accepted rewrite. */
 	const writeDraft = (draft: string): void => {
 		scope.inputActions?.setDraft?.(draft);
 	};
+
+	/**
+	 * Read the current status through a call.
+	 *
+	 * TypeScript narrows `state.status` from an early guard and keeps that
+	 * narrowing across `await`, where it is simply wrong: the flow can have moved
+	 * on while a request was in flight. Going through a function drops the stale
+	 * narrowing instead of inviting a comparison the compiler calls impossible.
+	 * @returns the status right now.
+	 */
+	const statusNow = (): FlowStatus => state.status;
 
 	/**
 	 * POST one stage.
@@ -216,13 +301,122 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		}
 	};
 
+	/**
+	 * Take the slower version: one write, its change list, and the fast result
+	 * kept behind "restore the fast version".
+	 * @param draft - slower text.
+	 * @param issues - slower change list.
+	 * @param assumptions - slower assumptions.
+	 */
+	const applySlow = (draft: string, issues: Issue[], assumptions: string[]): void => {
+		patch({
+			slowPhase: "applied",
+			slowDraft: draft,
+			slowIssues: issues,
+			slowAssumptions: assumptions,
+			slowCount: issues.length,
+			issues,
+			assumptions,
+			writtenDraft: draft
+		});
+		writeDraft(draft);
+	};
+
+	/**
+	 * Review a result that already landed, without ever blocking it.
+	 *
+	 * The fast draft is written first and stays usable; this pass only replaces it
+	 * automatically when all five safety valves hold. Anything else — a slow
+	 * answer past the window, focus gone, an edit, an empty change list, an
+	 * identical draft, a transport or model failure — either offers the version or
+	 * stays silent, and never touches the draft.
+	 * @param fastDraft - exactly the text the fast pass wrote.
+	 */
+	const startSlow = async (fastDraft: string): Promise<void> => {
+		const controller = new AbortController();
+		slowInFlight = controller;
+		const issuedAt = Date.now();
+		// A review that yields nothing must not leave the bar claiming one is still
+		// running; this only ever clears a still-running phase.
+		const dropSlow = (): void => {
+			if (state.slowPhase === "running") patch({ slowPhase: "none" });
+		};
+		let result: EnhanceResult;
+		try {
+			const response = await fetch(ROUTE, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					sessionId: scope.sessionId ?? "",
+					stage: "slow",
+					draft: fastDraft,
+					baselineDraft: state.baselineDraft
+				} satisfies EnhanceRequest),
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				dropSlow();
+				return;
+			}
+			result = await response.json() as EnhanceResult;
+		} catch {
+			// Transport failure (including this pass being aborted): the fast result
+			// is already in the composer, so a failed review reports nothing.
+			dropSlow();
+			return;
+		}
+		if (slowInFlight !== controller) return;
+		slowInFlight = null;
+		// The bar may be gone, or the draft replaced by a newer run, by now.
+		if (state.status !== "done" || state.writtenDraft !== fastDraft) return;
+		if (result.ok !== true) {
+			dropSlow();
+			return;
+		}
+		const draft = typeof result.draft === "string" ? result.draft : "";
+		if (draft.trim() === "" || draft === fastDraft) {
+			dropSlow();
+			return;
+		}
+		const issues = normalizeIssues(result.issues);
+		if (issues.length === 0) {
+			dropSlow();
+			return;
+		}
+		const assumptions = normalizeAssumptions(result.assumptions);
+		const elapsed = Date.now() - issuedAt;
+		// Facts may not have caught up with our own write yet, so an unedited draft
+		// is either the text we wrote or still the baseline it came from.
+		const factsDraft = state.facts.draft;
+		const unedited = factsDraft === fastDraft || factsDraft === state.baselineDraft;
+		if (elapsed <= SLOW_WINDOW_MS && unedited && editorHasFocus()) {
+			applySlow(draft, issues, assumptions);
+			return;
+		}
+		patch({
+			slowPhase: "offered",
+			slowDraft: draft,
+			slowIssues: issues,
+			slowAssumptions: assumptions,
+			slowCount: issues.length
+		});
+	};
+
 	/** Land a finished rewrite: state first, so the write cannot dismiss itself. */
 	const acceptDraft = (draft: string, result: EnhanceResult): void => {
+		abortSlow();
+		const issues = normalizeIssues(result.issues);
+		const assumptions = normalizeAssumptions(result.assumptions);
 		patch({
 			status: "done",
 			writtenDraft: draft,
-			issues: normalizeIssues(result.issues),
-			assumptions: normalizeAssumptions(result.assumptions),
+			issues,
+			assumptions,
+			...NO_SLOW,
+			slowPhase: "running",
+			fastDraft: draft,
+			fastIssues: issues,
+			fastAssumptions: assumptions,
 			chips: [],
 			questions: [],
 			reason: "",
@@ -231,7 +425,10 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 			chipOther: "",
 			chipOtherOpen: false
 		});
+		// The fast result is usable before the review starts; the review never
+		// delays it and never blocks the composer.
 		writeDraft(draft);
+		void startSlow(draft);
 	};
 
 	const fail = (code: string, message: string): void => {
@@ -332,6 +529,7 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		if (draft.trim() === "") return;
 		if (state.facts.phase !== "plain" || state.facts.refCount > 0) return;
 		abortInFlight();
+		abortSlow();
 		clearNoticeTimer();
 		patch({
 			status: "gating",
@@ -348,7 +546,8 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 			writtenDraft: null,
 			errorCode: "",
 			errorMessage: "",
-			rounds: 0
+			rounds: 0,
+			...NO_SLOW
 		});
 		const result = await post({
 			sessionId: scope.sessionId ?? "",
@@ -357,7 +556,9 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 			questions: [],
 			answers: {}
 		});
-		if (state.status !== "gating" || state.baselineDraft !== draft) return;
+		// Re-read through a call: the response is async, so the status the guard
+		// above narrowed no longer describes this moment.
+		if (statusNow() !== "gating" || state.baselineDraft !== draft) return;
 		settle(result, draft);
 	};
 
@@ -422,6 +623,7 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 	const cancel = (): void => {
 		clearNoticeTimer();
 		abortInFlight();
+		abortSlow();
 		patch({
 			status: "idle",
 			reason: "",
@@ -436,13 +638,15 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 			writtenDraft: null,
 			errorCode: "",
 			errorMessage: "",
-			rounds: 0
+			rounds: 0,
+			...NO_SLOW
 		});
 	};
 
 	/** Drop a finished or failed run's notice, leaving the draft alone. */
 	const dismiss = (): void => {
 		clearNoticeTimer();
+		abortSlow();
 		patch({
 			status: "idle",
 			issues: [],
@@ -451,7 +655,8 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 			errorCode: "",
 			errorMessage: "",
 			reason: "",
-			rounds: 0
+			rounds: 0,
+			...NO_SLOW
 		});
 	};
 
@@ -459,6 +664,7 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 	const restore = (): void => {
 		const previous = state.baselineDraft;
 		clearNoticeTimer();
+		abortSlow();
 		patch({
 			status: "idle",
 			issues: [],
@@ -467,9 +673,37 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 			errorCode: "",
 			errorMessage: "",
 			reason: "",
-			rounds: 0
+			rounds: 0,
+			...NO_SLOW
 		});
 		writeDraft(previous);
+	};
+
+	/** Take the slower version the offer line has been holding. */
+	const applyOfferedSlow = (): void => {
+		const draft = state.slowDraft;
+		if (draft === null || state.status !== "done") return;
+		applySlow(draft, state.slowIssues, state.slowAssumptions);
+	};
+
+	/** Put the fast result back after a slow replacement. */
+	const restoreFast = (): void => {
+		const fast = state.fastDraft;
+		if (fast === null || state.status !== "done") return;
+		abortSlow();
+		patch({
+			issues: state.fastIssues,
+			assumptions: state.fastAssumptions,
+			writtenDraft: fast,
+			...NO_SLOW
+		});
+		writeDraft(fast);
+	};
+
+	/** Hide the offer line, leaving the draft exactly as it is. */
+	const dismissSlowOffer = (): void => {
+		abortSlow();
+		patch({ ...NO_SLOW });
 	};
 
 	return {
@@ -514,6 +748,9 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		cancel,
 		dismiss,
 		restore,
+		applySlow: applyOfferedSlow,
+		restoreFast,
+		dismissSlowOffer,
 		sync(facts) {
 			const previous = state.facts;
 			const unchanged = previous.draft === facts.draft

@@ -50,7 +50,43 @@ export interface SlotProps {
 /** BCP-47 test for the locales this build addresses in Chinese. */
 const CJK_RE = /^zh\b|^zh-|-hans\b|-hant\b/iu;
 
-const COPY = {
+/**
+ * One locale's copy table.
+ *
+ * Declared as an interface rather than inferred from the Chinese table: with
+ * `typeof COPY.zh` the English strings are a different literal type and the
+ * table stops being assignable to its own lookup result.
+ */
+interface Copy {
+	enhance: string;
+	analyzing: string;
+	writing: string;
+	empty: string;
+	locked: string;
+	references: string;
+	clarifying: string;
+	enhanced: string;
+	restore: string;
+	close: string;
+	cancel: string;
+	skip: string;
+	apply: string;
+	needConfirm: string;
+	writeOwn: string;
+	otherHint: string;
+	freeHint: string;
+	recommended: string;
+	failed: string;
+	assumptions: string;
+	/** The slow review's offer line, with its change count. */
+	slowOffer: (count: number) => string;
+	slowApply: string;
+	restoreFast: string;
+	kinds: Record<string, string>;
+	reasons: Record<string, string>;
+}
+
+const COPY: Record<"en" | "zh", Copy> = {
 	en: {
 		enhance: "Enhance prompt",
 		analyzing: "Reading the draft…",
@@ -72,6 +108,9 @@ const COPY = {
 		recommended: "Recommended",
 		failed: "Enhance failed: ",
 		assumptions: "Assumed: ",
+		slowOffer: (count) => `A stricter version is available (${count} changes)`,
+		slowApply: "Review & replace",
+		restoreFast: "Restore fast version",
 		kinds: { added: "added", clarified: "clarified", restructured: "restructured", assumption: "assumption" },
 		reasons: {
 			"no-route": "no model route is available",
@@ -82,7 +121,7 @@ const COPY = {
 			network: "the request did not reach the host",
 			aborted: "cancelled",
 			internal: "internal error"
-		} as Record<string, string>
+		}
 	},
 	zh: {
 		enhance: "增强提示词",
@@ -105,6 +144,9 @@ const COPY = {
 		recommended: "推荐",
 		failed: "增强失败：",
 		assumptions: "假设：",
+		slowOffer: (count) => `更严格的版本可用（改了 ${count} 处）`,
+		slowApply: "查看/替换",
+		restoreFast: "还原到快轨版",
 		kinds: { added: "新增", clarified: "明确", restructured: "重组", assumption: "假设" },
 		reasons: {
 			"no-route": "没有可用的模型路由",
@@ -115,12 +157,9 @@ const COPY = {
 			network: "请求没有到达 host",
 			aborted: "已取消",
 			internal: "内部错误"
-		} as Record<string, string>
+		}
 	}
-} as const;
-
-/** One locale's copy table. */
-type Copy = typeof COPY.zh;
+};
 
 /** Tone and label for each change-list kind. */
 const KIND_TONE: Record<string, TagTone> = {
@@ -263,18 +302,42 @@ function CloseButton({ label, onClick }: { label: string; onClick: () => void })
  * @param props.state - flow state.
  * @param props.t - copy table.
  * @param props.onRestore - write the pre-run draft back.
+ * @param props.onRestoreFast - put the fast result back after a slow replacement.
+ * @param props.onApplySlow - take the slower version the offer line holds.
+ * @param props.onDismissSlow - hide the offer line without touching the draft.
  * @param props.onClose - retire the notice.
  */
 function ResultBar(
-	{ state, t, onRestore, onClose }: { state: FlowState; t: Copy; onRestore: () => void; onClose: () => void }
+	{ state, t, onRestore, onRestoreFast, onApplySlow, onDismissSlow, onClose }: {
+		state: FlowState;
+		t: Copy;
+		onRestore: () => void;
+		onRestoreFast: () => void;
+		onApplySlow: () => void;
+		onDismissSlow: () => void;
+		onClose: () => void;
+	}
 ) {
 	return (
-		<div className="dshce-card" data-dshce="result">
+		<div className="dshce-card" data-dshce="result" data-slow={state.slowPhase}>
 			<div className="dshce-body">
 				<div className="dshce-row">
 					<span className="dshce-lead"><IconSparkle16 size={14} /></span>
 					<span className="dshce-title">{t.enhanced}</span>
 					<span className="dshce-spacer" />
+					{state.slowPhase === "applied"
+						? (
+							<Button
+								variant="ghost"
+								size="sm"
+								type="button"
+								data-dshce="restore-fast"
+								onClick={onRestoreFast}
+							>
+								{t.restoreFast}
+							</Button>
+						)
+						: null}
 					<Button variant="outline" size="sm" type="button" data-dshce="restore" onClick={onRestore}>
 						{t.restore}
 					</Button>
@@ -296,6 +359,26 @@ function ResultBar(
 								<li key={`a:${index}`}>{`${t.assumptions}${assumption}`}</li>
 							))}
 						</ul>
+					)
+					: null}
+				{state.slowPhase === "offered" && state.slowDraft !== null
+					? (
+						// The slow review landed outside its safety valves, so the draft
+						// stays untouched and the stricter text waits behind a click.
+						<div className="dshce-offer" data-dshce="slow-offer">
+							<span className="dshce-offerText">{t.slowOffer(state.slowCount)}</span>
+							<span className="dshce-spacer" />
+							<Button
+								variant="outline"
+								size="sm"
+								type="button"
+								data-dshce="slow-apply"
+								onClick={onApplySlow}
+							>
+								{t.slowApply}
+							</Button>
+							<CloseButton label={t.close} onClick={onDismissSlow} />
+						</div>
 					)
 					: null}
 			</div>
@@ -488,6 +571,9 @@ export function EnhanceDock(props: SlotProps) {
 				state={state}
 				t={t}
 				onRestore={() => store.restore()}
+				onRestoreFast={() => store.restoreFast()}
+				onApplySlow={() => store.applySlow()}
+				onDismissSlow={() => store.dismissSlowOffer()}
 				onClose={() => store.dismiss()}
 			/>
 		);

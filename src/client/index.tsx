@@ -17,6 +17,8 @@
  * to the button without prop threading.
  */
 import { installStyles } from "./styles";
+import type { ReactNode } from "react";
+
 import { EnhanceButton, EnhanceDock, type SlotProps, type Store } from "./ui";
 
 /** Plugin id, also the label every slot registration carries. */
@@ -67,9 +69,10 @@ function localeStoreOf(ctx: ClientContext): Store<string> {
 
 /**
  * A slot occupant. It must RENDER its component: returning the element would
- * hand React a function where it expects a child.
+ * hand React a function where it expects a child. The return type is ReactNode
+ * because the dock occupant returns null while it owns no dock space.
  */
-type SlotComponent = (props: SlotProps) => unknown;
+type SlotComponent = (props: SlotProps) => ReactNode;
 
 /**
  * Plugin entry point for the client tree.

@@ -23,8 +23,8 @@ export const MAX_OPTIONS = 5;
  *
  * The `chips` shape carries no question id of its own, so the pick travels as
  * `answers: { "chips": [label] }` with an empty `questions` echo. The host
- * branches on `questions.length === 0` and flattens `answers` into the
- * "user's choice" paragraph it feeds the rewrite; Lead confirmed the key.
+ * branches on a non-empty `answers` and flattens it into the "user's choice"
+ * paragraph it feeds the rewrite; protocol.md fixes the key.
  */
 export const CHIPS_ANSWER_KEY = "chips";
 
@@ -34,6 +34,21 @@ export const CHIPS_ANSWER_KEY = "chips";
  * returns a draft would loop forever.
  */
 export const MAX_GATE_ROUNDS = 2;
+
+/**
+ * How long the slow review may take and still replace the draft by itself
+ * (protocol constants table: 慢轨自动替换窗口).
+ *
+ * This is a sanity cap, not the real guard. What actually protects the user is
+ * that the draft is still focused and byte-identical to what the fast pass wrote;
+ * a draft that satisfies both is one the user has not taken over. The window only
+ * bounds how long after the write we are still willing to act, and at
+ * `reasoningEffort: max` a real review was measured anywhere from 1.2s to 9.5s —
+ * an 8s window silently disabled the auto-apply branch on this machine. Past the
+ * window the slower version is offered for a click instead, and an applied
+ * replacement always carries its change list plus 「还原到快轨版」.
+ */
+export const SLOW_WINDOW_MS = 30_000;
 
 /** Gate shapes the host may answer with. */
 export type GateShape = "chips" | "panel" | "none";

@@ -48,6 +48,10 @@ const CSS = [
 	".dshce-kind{flex:none;margin-top:1px}",
 	// Assumptions read one level quieter than the change list on purpose.
 	".dshce-assumptions{margin:2px 0 0;padding:0 0 0 2px;list-style:none;display:flex;flex-direction:column;gap:2px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}",
+	// The slow review's offer sits one level below the change list: the draft above
+	// it is untouched, so this reads as a suggestion, not as a result.
+	".dshce-offer{display:flex;align-items:center;gap:8px;min-width:0;margin-top:2px;padding-top:6px;border-top:.5px solid var(--dsw-alias-border-l1)}",
+	".dshce-offerText{min-width:0;color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;flex:none;font-size:12px;line-height:20px}",
 	".dshce-question{display:flex;flex-direction:column;gap:4px;min-width:0}",
 	".dshce-qhead{color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;line-height:16px}",
 	".dshce-qtext{margin:0;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}",
