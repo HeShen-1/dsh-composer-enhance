@@ -22,7 +22,7 @@ node <repo>/test/handler-smoke.mjs     # 24 项
 | `dsh.client` 声明 | `package.json` 的 `dsh.client = { platform: "web", inject: ["@deepseek-ai/dsh-client-ui-primitives"] }`，只声明真正 require 的非基线模块 | ✅ |
 | 进入模块图并被服务 | boot graph 里出现 combo URL `/plugins/??…,dsh-composer-enhance/client.js&rev=…`，HTTP 200 / 144 KB | ✅ |
 | host 半部不依赖 DSH 内部包的 symlink | `src/index.ts` 只 import Node builtin（`node:fs/promises`、`node:path`），所有 DSH 能力经 `ctx.get()` 取得 | ✅ |
-| 类型检查通过 | `tsc --noEmit`。host 侧原有 5 个错误（缺 `@types/node`）已修；客户端 3 个错误（`index.tsx:85` TS2786、`store.ts:360` TS2367、`ui.tsx:152` TS2322）修复中 | ⏳ |
+| 类型检查通过 | `tsc --noEmit` exit 0、无输出。host 侧原有 5 个错误（缺 `@types/node`）与客户端 3 个错误（`index.tsx:85` TS2786、`store.ts:360` TS2367、`ui.tsx:152` TS2322）均已修 | ✅ |
 
 ## B 观感同构
 
@@ -66,7 +66,8 @@ node <repo>/test/handler-smoke.mjs     # 24 项
 | 改动清单 + 一键还原 | 真机：结果条列出 kind 标签的 issues 与「假设：…」，「还原原文」把草稿写回 | ✅ |
 | chips 不再卡死 | 真机：`questions: []` + `answers:{"chips":["日语"]}` → 响应 `gate` 字段缺席、直接出改写，1.9s；浏览器点 chip 后 console 无任何 composer-enhance 警告（即客户端重试兜底未触发） | ✅ |
 | 草稿改动即作废 | 快轨阶段草稿被改 → 流程作废（客户端已有行为，真机验过） | ✅ |
-| **慢轨复核（双轨）** | host 侧就绪并有断言；**客户端尚未调用**，补齐中 | ⏳ |
+| **慢轨复核（双轨）** | 真机：点 ✨ 后 `data-slow="running"`（t=3s、6s），**同刻草稿已是快轨结果**（51 字）→ 快轨未被阻塞；t=9s 起 `data-slow="none"`，草稿全程未被改、无 offer、无残留 `running`。五条安全阀与取消路径由客户端脚本化慢轨逐条验过（自动替换 / 编辑即作废 / 失败静默 / 超窗口 offer），截图见 `docs/evidence/client-slow-*.png` | ✅ |
+| **慢轨的实际产出（负面数据，但它决定要不要留这个功能）** | 真机 4 次慢轨复核，`issues` 计数为 **0 / 0 / 2 / 0**——多数时候"没话说"。也就是说这条每次 ✨ 都多花一次 `effort:max` 的模型调用，换来的是偶发的小幅收紧。窗口已从 8s 放宽到 30s（`effort:max` 实测延迟 1.2s–9.5s，8s 会把自动替换整条分支关掉） | ⚠️ 待决策 |
 
 ## 未做 / 已知限制
 
