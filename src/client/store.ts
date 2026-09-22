@@ -407,13 +407,21 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		abortSlow();
 		const issues = normalizeIssues(result.issues);
 		const assumptions = normalizeAssumptions(result.assumptions);
+		// The review pass costs its own `effort: "max"` call, and it only earns that
+		// when the gate actually found something to ask about. Measured on a live
+		// page over unambiguous drafts, four reviews reported 0 / 0 / 2 / 0
+		// substantive changes — mostly nothing to say. A draft that went through a
+		// real clarification is the case where a second, stricter read is worth
+		// paying for, and `rounds` already counts exactly that: it resets to 0 when a
+		// flow starts and increments each time the gate opens.
+		const review = state.rounds > 0;
 		patch({
 			status: "done",
 			writtenDraft: draft,
 			issues,
 			assumptions,
 			...NO_SLOW,
-			slowPhase: "running",
+			slowPhase: review ? "running" : "none",
 			fastDraft: draft,
 			fastIssues: issues,
 			fastAssumptions: assumptions,
@@ -428,7 +436,7 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		// The fast result is usable before the review starts; the review never
 		// delays it and never blocks the composer.
 		writeDraft(draft);
-		void startSlow(draft);
+		if (review) void startSlow(draft);
 	};
 
 	const fail = (code: string, message: string): void => {

@@ -44,7 +44,7 @@ plugin_manager  remove_bundle  dsh-composer-enhance
   │
   ├─ 改写：原地写回 + 改动清单 + 一键还原
   │
-  └─ 复核（慢轨，reasoningEffort: max）：只在「≤8s 返回 + 草稿仍聚焦 + 未被编辑 + 有实质改动」时才自动替换
+  └─ 复核（慢轨，reasoningEffort: max）：**仅当本轮闸门确实问过才跑**；只在「≤30s 返回 + 草稿仍聚焦 + 未被编辑 + 有实质改动」时才自动替换，否则只提示
 ```
 
 ### 设计上的几条硬规则
