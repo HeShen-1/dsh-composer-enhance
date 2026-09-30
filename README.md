@@ -104,9 +104,24 @@ plugin_manager  remove_bundle  dsh-composer-enhance
 pnpm install
 pnpm run build       # 产出 lib/index.js 与 lib/client.js
 pnpm run typecheck
-node test/host-smoke.mjs        # 34 项：解析与归一化
-node test/grounding-smoke.mjs   # 15 项：会话接地
 ```
+
+### 测试
+
+四个**离线**冒烟测试，都不需要 DSH 运行时、不需要网络（`cd /tmp && node <本仓库>/test/<file>.mjs` 也能跑）：
+
+```bash
+pnpm test                      # 四个全跑，顺序如下
+node test/grounding-smoke.mjs  # 15 项：会话接地（最近几轮 + 项目指令）
+node test/handler-smoke.mjs    # 24 项：请求级状态机（关键：一次请求调几次模型）
+node test/host-smoke.mjs       # 34 项：路由、配置归一化与 gate 解析
+node test/parser-smoke.mjs     # 36 项：解析层 —— JSON 抠取（围栏/前后废话/字符串里的括号）、
+                               #        gate 字段缺失与类型错的兜底、改写三段标记的降级
+```
+
+它们导入的是 `lib/`（构建产物），所以**改了 `src/` 要先 `pnpm run build` 再跑测试**。
+每个文件都是手写 `ok(name, cond)` 计数、末尾打印 `xxx-smoke: N passed, M failed` 并以退出码表态，
+不引测试框架。
 
 `lib/client.js` 的 envelope 是 `window.__ModuleLoader__.load({ id, factory })`，`id` 用包名——与官方 bundle 同形。host 半部是普通 ESM。
 

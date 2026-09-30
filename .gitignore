@@ -2,3 +2,7 @@ node_modules/
 *.log
 .DS_Store
 .probe
+# devflow 流程文件（PROJECT.md 进 git）
+.dev/state.json
+.dev/log/
+.dev/tickets.json
