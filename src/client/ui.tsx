@@ -636,7 +636,11 @@ export function SuggestGhost(props: SlotProps) {
 	const focused = useComposerFocus();
 	const [composing, setComposing] = useState(false);
 	const rootRef = useRef<HTMLDivElement | null>(null);
-	const [geometry, setGeometry] = useState<{ top: number; left: number } | null>(null);
+	// The composer's empty-input text origin in the shipped layout: card padding
+	// top 8 + editor padding top 4, left padding 14. Used until (and if) the
+	// measured geometry lands, so the ghost can never be hidden by a measurement
+	// failure.
+	const [geometry, setGeometry] = useState<{ top: number; left: number }>({ top: 12, left: 14 });
 
 	// IME composition owns the line: hide the ghost until the composition settles.
 	useEffect(() => {
@@ -659,17 +663,25 @@ export function SuggestGhost(props: SlotProps) {
 		&& focused
 		&& !composing;
 
+	// Tell the dock whether the ghost is actually on screen, so a missing overlay
+	// occupant degrades to the row instead of showing nothing.
+	useEffect(() => {
+		if (!visible) return;
+		store.setGhostReady(true);
+		return () => store.setGhostReady(false);
+	}, [visible, store]);
+
 	useLayoutEffect(() => {
-		if (!visible) {
-			setGeometry(null);
-			return;
-		}
+		if (!visible) return;
 		const root = rootRef.current;
 		if (root === null) return;
 		const anchor = root.offsetParent;
 		const card = root.closest("[data-composer-card]");
 		const editor = card?.querySelector('[contenteditable="true"]');
-		if (!(anchor instanceof HTMLElement) || !(editor instanceof HTMLElement)) return;
+		if (!(anchor instanceof HTMLElement) || !(editor instanceof HTMLElement)) {
+			// Keep the fallback origin; the ghost still renders.
+			return;
+		}
 		const measure = (): void => {
 			const anchorRect = anchor.getBoundingClientRect();
 			const editorRect = editor.getBoundingClientRect();
@@ -695,8 +707,8 @@ export function SuggestGhost(props: SlotProps) {
 	// styles cannot go stale.
 	const ghostStyle: CSSProperties = {
 		position: "absolute",
-		top: geometry?.top ?? 0,
-		left: geometry?.left ?? 0,
+		top: geometry.top,
+		left: geometry.left,
 		right: 8,
 		zIndex: 1,
 		pointerEvents: "none",
@@ -704,8 +716,7 @@ export function SuggestGhost(props: SlotProps) {
 		overflow: "hidden",
 		lineHeight: "inherit",
 		background: "var(--dsw-specific-input-major)",
-		color: "var(--dsw-alias-label-caption)",
-		visibility: geometry === null ? "hidden" : "visible"
+		color: "var(--dsw-alias-label-caption)"
 	};
 	const ghostTextStyle: CSSProperties = {
 		display: "block",
@@ -823,13 +834,13 @@ export function EnhanceDock(props: SlotProps) {
 
 	useEffect(() => {
 		const visible = typeof document === "undefined" || document.visibilityState === "visible";
-		store.observeIdle({ running, blank, visible });
-	}, [store, running, blank, state.facts.draft, state.facts.draftRev, state.facts.phase, status]);
+		store.observeIdle({ running, blank, visible, focused });
+	}, [store, running, blank, focused, state.facts.draft, state.facts.draftRev, state.facts.phase, status]);
 
 	useEffect(() => {
 		if (typeof document === "undefined") return;
 		const onVisibility = (): void => {
-			store.observeIdle({ running, blank, visible: document.visibilityState === "visible" });
+			store.observeIdle({ running, blank, visible: document.visibilityState === "visible", focused });
 		};
 		document.addEventListener("visibilitychange", onVisibility);
 		return () => document.removeEventListener("visibilitychange", onVisibility);
@@ -897,7 +908,10 @@ export function EnhanceDock(props: SlotProps) {
 			/>
 		);
 	}
-	if (status === "idle" && state.suggestStatus === "shown" && !focused) {
+	// The row is the fallback surface: unfocused, OR focused while the ghost is
+	// not actually rendering (overlay occupant missing/hidden). This guarantees a
+	// live suggestion is never invisible.
+	if (status === "idle" && state.suggestStatus === "shown" && (!focused || !state.ghostReady)) {
 		return (
 			<SuggestionRow
 				text={state.suggestion}

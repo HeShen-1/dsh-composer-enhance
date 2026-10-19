@@ -102,6 +102,12 @@ export interface FlowState {
 	suggestion: string;
 	/** The draft revision the suggestion was generated against; accept CAS's on it. */
 	suggestRev: number;
+	/**
+	 * Whether the in-box ghost is actually showing. The dock row uses this as a
+	 * fallback so a focused composer can never hide a suggestion completely when
+	 * the overlay occupant failed to mount.
+	 */
+	ghostReady: boolean;
 }
 
 /** The composer actions a slot component receives. */
@@ -142,8 +148,8 @@ export interface FlowStore {
 	restoreFast(): void;
 	/** Hide the offer line without touching the draft. */
 	dismissSlowOffer(): void;
-	/** Feed the Session's running/blank/visibility facts; the trigger edge lives here. */
-	observeIdle(input: { running: boolean; blank: boolean; visible: boolean }): void;
+	/** Feed the Session's running/blank/visibility/focus facts; the trigger edge lives here. */
+	observeIdle(input: { running: boolean; blank: boolean; visible: boolean; focused: boolean }): void;
 	/** A visibility change re-runs the scheduling without new Session facts. */
 	refreshIdle(): void;
 	/** Take the shown suggestion into the draft (CAS on `suggestRev`). */
@@ -152,6 +158,8 @@ export interface FlowStore {
 	dismissSuggestion(): void;
 	/** Stop suggestion work when the slot unmounts. */
 	suspend(): void;
+	/** Report whether the in-box ghost is actually rendering (fallback signal). */
+	setGhostReady(ready: boolean): void;
 	sync(facts: DraftFacts): void;
 }
 
@@ -174,10 +182,27 @@ const NO_SLOW: Pick<
 };
 
 /** The suggestion fields at rest. */
-const NO_SUGGEST: Pick<FlowState, "suggestStatus" | "suggestion" | "suggestRev"> = {
+const NO_SUGGEST: Pick<FlowState, "suggestStatus" | "suggestion" | "suggestRev" | "ghostReady"> = {
 	suggestStatus: "none",
 	suggestion: "",
-	suggestRev: 0
+	suggestRev: 0,
+	ghostReady: false
+};
+
+/**
+ * Suggestion-subsystem diagnostics.
+ *
+ * The row/ghost lifecycle is silent by design (a failed suggestion must never
+ * disturb the composer), which makes "nothing appeared" impossible to diagnose
+ * from the page alone. These `console.debug` lines are the one deliberate
+ * exception; Chrome hides them until the Console level is set to Verbose.
+ */
+const suggestDebug = (...args: unknown[]): void => {
+	try {
+		console.debug("[composer-enhance]", ...args);
+	} catch {
+		/* a missing console is not a composer problem */
+	}
 };
 
 /**
@@ -214,11 +239,18 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 	let suggestInFlight: AbortController | null = null;
 	let lastRunning = false;
 	let sawTurn = false;
-	let idleInput: { running: boolean; blank: boolean; visible: boolean } = { running: false, blank: true, visible: true };
+	let idleInput: { running: boolean; blank: boolean; visible: boolean; focused: boolean } = { running: false, blank: true, visible: true, focused: false };
 	let lastSuggestAt = 0;
 	let suggestSuppressUntil = 0;
 	let suggestCooldownUntil = 0;
 	let suggestDismissals = 0;
+	/**
+	 * A client hot reload replaces this module (and the store) while the Session
+	 * is already idle, so the running true→false edge that normally arms the
+	 * trigger is gone. The first focus of an empty composer in a non-blank
+	 * Session arms it once, which is also the moment a user expects a hint.
+	 */
+	let firstFocusArmed = false;
 
 	const state: FlowState = {
 		status: "idle",
@@ -825,6 +857,7 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		const controller = new AbortController();
 		suggestInFlight = controller;
 		lastSuggestAt = Date.now();
+		suggestDebug("requesting suggestion", { sessionId: scope.sessionId, rev });
 		patch({ suggestStatus: "loading", suggestion: "", suggestRev: rev });
 		let result: EnhanceResult;
 		try {
@@ -864,14 +897,17 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 			return;
 		}
 		if (result.ok !== true) {
+			suggestDebug("suggestion request failed", { reason: result.reason, message: result.message });
 			dropSuggestion();
 			return;
 		}
 		const text = normalizeSuggestion(result.suggestion);
 		if (text === "") {
+			suggestDebug("suggestion returned empty");
 			dropSuggestion();
 			return;
 		}
+		suggestDebug("suggestion shown", { text });
 		patch({ suggestStatus: "shown", suggestion: text, suggestRev: rev });
 		if (suggestExpiry !== null) clearTimeout(suggestExpiry);
 		suggestExpiry = setTimeout(() => {
@@ -880,11 +916,14 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		}, SUGGESTION_TTL_MS);
 	};
 
-	const observeIdle = (input: { running: boolean; blank: boolean; visible: boolean }): void => {
+	const observeIdle = (input: { running: boolean; blank: boolean; visible: boolean; focused: boolean }): void => {
 		const turned = lastRunning && !input.running;
 		lastRunning = input.running;
 		idleInput = input;
-		if (turned) sawTurn = true;
+		if (turned) {
+			sawTurn = true;
+			suggestDebug("turn ended", { running: false, blank: input.blank });
+		}
 		if (input.running) {
 			// Sending a message invalidates whatever the row was showing.
 			dropSuggestion();
@@ -893,6 +932,13 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		if (!input.visible) {
 			dropSuggestion();
 			return;
+		}
+		// Hot-reload / first-mount recovery: arm the trigger once on the first
+		// focused idle composer of a Session that already contains history.
+		if (!sawTurn && !firstFocusArmed && input.focused && !input.blank) {
+			firstFocusArmed = true;
+			sawTurn = true;
+			suggestDebug("armed by first focus (idle, non-blank session)", { blank: input.blank });
 		}
 		scheduleSuggestion();
 	};
@@ -953,6 +999,12 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		lastRunning = false;
 	};
 
+	const setGhostReady = (ready: boolean): void => {
+		if (state.ghostReady === ready) return;
+		suggestDebug("ghost ready", { ready });
+		patch({ ghostReady: ready });
+	};
+
 	return {
 		getSnapshot: () => snapshot,
 		subscribe(listener) {
@@ -1003,6 +1055,7 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		acceptSuggestion,
 		dismissSuggestion,
 		suspend,
+		setGhostReady,
 		sync(facts) {
 			const previous = state.facts;
 			const unchanged = previous.draft === facts.draft
