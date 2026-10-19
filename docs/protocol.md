@@ -123,7 +123,7 @@ host 遇到非空 `answers` 时**直接改写、不再过闸门**，所以不存
 | 名称 | 值 |
 |---|---|
 | 路由 | `/dsh-composer-enhance/enhance` |
-| 插槽 | 按钮 `conversation.input.right` order 10；面板 `conversation.input.dock` order 5 |
+| 插槽 | 按钮 `conversation.input.right` order 10；建议条/面板 `conversation.input.dock` order 5；内联 ghost `conversation.input.overlay` order 5 |
 | 问题上限 | 3 |
 | 选项上限 | 5 |
 | chips 上限 | 4 |

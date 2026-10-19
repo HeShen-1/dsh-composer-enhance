@@ -16,7 +16,14 @@ DeepSeek Harness Web 的**输入框提示词增强**插件。
 - **拒绝**：点 × 或 Esc；开始打字、发送、切会话、隐藏页面都会立即作废。
 - 静默失败，不打扰。
 
-设计依据与限制见 [docs/design-web-suggestion-ux.md](docs/design-web-suggestion-ux.md)（内联 ghost 是 P1，P0 只做建议条）。
+### 内联灰色 ghost（P1）
+
+composer 聚焦且草稿为空时，同一条建议改为渲染在**输入框内**：灰色单行文本，尾部一个 `Tab` 键帽；
+输入框失焦时退回上方建议条（文字不重复展示两遍）。实现用 `conversation.input.overlay` 视觉层，
+几何位置从公开的 `[data-composer-card]` + `contenteditable` 根节点量测，并用卡背景色盖住 shell
+自带 placeholder；绝对定位层不参与布局，所以 ghost 只显示一行，完整建议可用 Tab 直接采纳。
+
+设计依据与限制见 [docs/design-web-suggestion-ux.md](docs/design-web-suggestion-ux.md)。
 
 ---
 

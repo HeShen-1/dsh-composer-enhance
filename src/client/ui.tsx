@@ -6,7 +6,7 @@
  * `Tag`, `Tooltip` and the shipped icons — so hover, focus, keyboard and theme
  * behaviour come from the design system instead of from local artwork.
  */
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { TagTone } from "@deepseek-ai/dsh-client-ui-primitives";
 import {
 	Button,
@@ -91,6 +91,7 @@ interface Copy {
 	slowApply: string;
 	restoreFast: string;
 	/** Next-message suggestion row. */
+	suggestTitle: string;
 	suggestPrefix: string;
 	suggestAccept: string;
 	suggestDismiss: string;
@@ -123,6 +124,7 @@ const COPY: Record<"en" | "zh", Copy> = {
 		slowOffer: (count) => `A stricter version is available (${count} changes)`,
 		slowApply: "Review & replace",
 		restoreFast: "Restore fast version",
+		suggestTitle: "Next message",
 		suggestPrefix: "Suggestion: ",
 		suggestAccept: "Use",
 		suggestDismiss: "Dismiss suggestion",
@@ -162,6 +164,7 @@ const COPY: Record<"en" | "zh", Copy> = {
 		slowOffer: (count) => `更严格的版本可用（改了 ${count} 处）`,
 		slowApply: "查看/替换",
 		restoreFast: "还原到快轨版",
+		suggestTitle: "下一步建议",
 		suggestPrefix: "建议：",
 		suggestAccept: "采用",
 		suggestDismiss: "关闭建议",
@@ -568,6 +571,32 @@ function composerPopupOpen(): boolean {
 }
 
 /**
+ * Whether the composer card currently owns focus.
+ *
+ * The ghost is only drawn while the user is in the composer (otherwise the
+ * dock row carries the full suggestion), and Tab accepts only from there.
+ * @returns whether focus is inside `[data-composer-card]`.
+ */
+function useComposerFocus(): boolean {
+	const [focused, setFocused] = useState(false);
+	useEffect(() => {
+		if (typeof document === "undefined") return;
+		const update = (): void => {
+			const active = document.activeElement;
+			setFocused(active instanceof Element && active.closest("[data-composer-card]") !== null);
+		};
+		update();
+		document.addEventListener("focusin", update);
+		document.addEventListener("focusout", update);
+		return () => {
+			document.removeEventListener("focusin", update);
+			document.removeEventListener("focusout", update);
+		};
+	}, []);
+	return focused;
+}
+
+/**
  * Best-effort keyboard return to the composer after a click accept.
  *
  * `InputActions` has no `focus()`; a mousedown `preventDefault` keeps focus in
@@ -584,23 +613,139 @@ function focusComposerIfNeeded(): void {
 }
 
 /**
- * The next-message suggestion row (P0 of the Web suggestion design).
+ * The inline gray ghost (P1).
+ *
+ * DSH exposes no editor/caret surface to plugins, so this is the one honest
+ * in-box form: the suggestion is drawn over the shell's own placeholder while
+ * the draft is empty (caret is necessarily at the start), inside
+ * `conversation.input.overlay`. Geometry is measured from the public
+ * `[data-composer-card]` anchor and the standard `contenteditable` root, not
+ * from CSS-module class names; the opaque card-background patch is what hides
+ * the shell placeholder underneath. One line only: the card does not grow for
+ * an absolutely positioned layer, and a second line would collide with the
+ * toolbar row.
+ * @param props - framework props of the `conversation.input.overlay` slot.
+ * @returns the ghost element, or null when it must not show.
+ */
+export function SuggestGhost(props: SlotProps) {
+	const { store, state } = useFlow(props);
+	const draft = props.useInput((value) => value.draft);
+	const phase = props.useInput((value) => value.phase);
+	const attachmentCount = props.useInput((value) => value.attachmentIds?.length ?? 0);
+	const focused = useComposerFocus();
+	const [composing, setComposing] = useState(false);
+	const rootRef = useRef<HTMLDivElement | null>(null);
+	const [geometry, setGeometry] = useState<{ top: number; left: number } | null>(null);
+
+	// IME composition owns the line: hide the ghost until the composition settles.
+	useEffect(() => {
+		if (typeof document === "undefined") return;
+		const onStart = (): void => setComposing(true);
+		const onEnd = (): void => setComposing(false);
+		document.addEventListener("compositionstart", onStart, true);
+		document.addEventListener("compositionend", onEnd, true);
+		return () => {
+			document.removeEventListener("compositionstart", onStart, true);
+			document.removeEventListener("compositionend", onEnd, true);
+		};
+	}, []);
+
+	const visible = state.suggestStatus === "shown"
+		&& state.status === "idle"
+		&& draft === ""
+		&& phase === "plain"
+		&& attachmentCount === 0
+		&& focused
+		&& !composing;
+
+	useLayoutEffect(() => {
+		if (!visible) {
+			setGeometry(null);
+			return;
+		}
+		const root = rootRef.current;
+		if (root === null) return;
+		const anchor = root.offsetParent;
+		const card = root.closest("[data-composer-card]");
+		const editor = card?.querySelector('[contenteditable="true"]');
+		if (!(anchor instanceof HTMLElement) || !(editor instanceof HTMLElement)) return;
+		const measure = (): void => {
+			const anchorRect = anchor.getBoundingClientRect();
+			const editorRect = editor.getBoundingClientRect();
+			// The editor's text origin: the contenteditable padding is 4px top,
+			// 14px left in the shipped composer. Measured, not assumed.
+			setGeometry({ top: editorRect.top - anchorRect.top + 4, left: editorRect.left - anchorRect.left + 14 });
+		};
+		measure();
+		const observer = new ResizeObserver(measure);
+		observer.observe(anchor);
+		observer.observe(editor);
+		window.addEventListener("resize", measure);
+		return () => {
+			observer.disconnect();
+			window.removeEventListener("resize", measure);
+		};
+	}, [visible]);
+
+	if (!visible) return null;
+	return (
+		<div
+			ref={rootRef}
+			className="dshce-ghost"
+			data-dshce="ghost"
+			style={{ top: geometry?.top ?? 0, left: geometry?.left ?? 0, visibility: geometry === null ? "hidden" : "visible" }}
+		>
+			<span className="dshce-ghostText">{state.suggestion}</span>
+			<button
+				type="button"
+				className="dshce-ghostKey"
+				aria-keyshortcuts="Tab"
+				aria-label="Tab"
+				data-dshce="ghost-accept"
+				onMouseDown={(event) => event.preventDefault()}
+				onClick={() => {
+					if (store.acceptSuggestion()) focusComposerIfNeeded();
+				}}
+			>
+				Tab
+			</button>
+		</div>
+	);
+}
+
+/**
+ * The next-message suggestion row.
+ *
+ * Full mode (composer unfocused) carries the whole suggestion; compact mode
+ * (composer focused) runs beside the in-box ghost, so the text is not shown
+ * twice — the ghost owns the words, the row owns the buttons.
  * @param props.text - the suggestion.
+ * @param props.compact - hide the text because the in-box ghost shows it.
  * @param props.t - copy table.
  * @param props.onAccept - write it into the draft (one step, no send).
  * @param props.onDismiss - retire it and start the suppression clock.
  */
 function SuggestionRow(
-	{ text, t, onAccept, onDismiss }: { text: string; t: Copy; onAccept: () => void; onDismiss: () => void }
+	{ text, compact, t, onAccept, onDismiss }: {
+		text: string;
+		compact: boolean;
+		t: Copy;
+		onAccept: () => void;
+		onDismiss: () => void;
+	}
 ) {
 	return (
-		<div className="dshce-card dshce-suggest" data-dshce="suggest" role="status" aria-live="polite">
+		<div className="dshce-card dshce-suggest" data-dshce="suggest" data-compact={compact ? "true" : undefined}>
 			<div className="dshce-body">
 				<div className="dshce-row">
 					<span className="dshce-lead"><IconSparkleRegular size={14} /></span>
-					<span className="dshce-suggestText" title={text}>
-						<span className="dshce-suggestLabel">{t.suggestPrefix}</span>{text}
-					</span>
+					{compact
+						? <span className="dshce-suggestLabel">{t.suggestTitle}</span>
+						: (
+							<span className="dshce-suggestText" title={text}>
+								<span className="dshce-suggestLabel">{t.suggestPrefix}</span>{text}
+							</span>
+						)}
 					<span className="dshce-spacer" />
 					<Button
 						variant="ghost"
@@ -634,6 +779,9 @@ export function EnhanceDock(props: SlotProps) {
 	// worth paying a model call for. `blank` keeps brand-new Sessions quiet.
 	const running = props.useSession?.((value) => value.running === true) ?? false;
 	const blank = props.useSession?.((value) => value.blank === true) ?? true;
+	// Focus decides which surface carries the suggestion text: the in-box ghost
+	// while the composer is focused, the full dock row while it is not.
+	const focused = useComposerFocus();
 
 	useEffect(() => {
 		const visible = typeof document === "undefined" || document.visibilityState === "visible";
@@ -715,6 +863,7 @@ export function EnhanceDock(props: SlotProps) {
 		return (
 			<SuggestionRow
 				text={state.suggestion}
+				compact={focused}
 				t={t}
 				onAccept={acceptSuggestion}
 				onDismiss={() => store.dismissSuggestion()}

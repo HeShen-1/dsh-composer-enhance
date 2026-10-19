@@ -58,6 +58,14 @@ const CSS = [
 	".dshce-suggestText{min-width:0;color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;overflow:hidden;flex:auto;font-size:13px;line-height:20px}",
 	".dshce-suggestLabel{color:var(--dsw-alias-label-caption);margin-right:2px}",
 	".dshce-kbd{margin-left:6px;padding:0 4px;border:.5px solid var(--dsw-alias-border-l1);border-radius:4px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-tertiary);font-family:inherit;font-size:11px;line-height:16px}",
+	// The inline gray ghost (P1): absolutely positioned by measured geometry in
+	// the composer's overlay layer. The opaque card-background patch is what
+	// hides the shell's own placeholder underneath; one line only, because the
+	// card does not grow for an absolutely positioned layer.
+	".dshce-ghost{position:absolute;right:8px;z-index:1;pointer-events:none;color:var(--dsw-alias-label-caption);background:var(--dsw-specific-input-major);white-space:nowrap;overflow:hidden}",
+	".dshce-ghostText{display:block;padding-right:52px;text-overflow:ellipsis;overflow:hidden;white-space:nowrap}",
+	".dshce-ghostKey{position:absolute;top:2px;right:4px;pointer-events:auto;cursor:pointer;padding:0 4px;border:.5px solid var(--dsw-alias-border-l1);border-radius:4px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-tertiary);font-family:inherit;font-size:11px;line-height:16px}",
+	".dshce-ghostKey:hover{color:var(--dsw-alias-label-primary)}",
 	".dshce-question{display:flex;flex-direction:column;gap:4px;min-width:0}",
 	".dshce-qhead{color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;line-height:16px}",
 	".dshce-qtext{margin:0;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}",

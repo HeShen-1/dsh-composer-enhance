@@ -54,7 +54,8 @@ node <repo>/test/parser-smoke.mjs      # 36 项
 | 从 git 地址安装 | 先 `remove_bundle`，再 `install_bundle https://github.com/HeShen-1/dsh-composer-enhance` → `+ dsh-composer-enhance github:HeShen-1/dsh-composer-enhance`，5.6s，`applied` | ✅ |
 | git 安装的副本真的工作 | 装完后路由返回 `engine: 0.2.2-m1`；两个插槽占用者均 `active: true` | ✅ |
 | **模型路由（no-route 修复）** | 真机 0.2.1-rc.2：修前同一路由返回 `reason:"no-route"`；修后返回 `ok:true, engine:"0.2.1-m1", route:{provider:"deepseek-official", model:"deepseek-flash", reasoningEffort:"off"}`，闸门与改写两段都是真实模型调用。路由顺序 = config → 活 Session 的 `modelSelection` 投影 → `ctx.agentDefaultModel.currentSelection()`；`test/host-smoke.mjs` 覆盖每条分支（含投影抛错降级） | ✅ |
-| **下一步建议（P0）** | host 真机 0.2.1-rc.2：空草稿 `{"stage":"suggest","draft":""}` 返回 `ok:true, engine:"0.2.2-m1", suggestion:"先按 P0 走：在输入框上方加一行建议条，点击后填入草稿但不发送。"`（内容来自最近对话）；非空 draft 返回 400；`normalizeSuggestion` 11 项离线用例（标签/引号/围栏/折行/截断/空值）。客户端建议条与 Tab 采纳已在代码层接上全部门控，待页面真机点击确认后改 ✅ | ⏳ 待 UI 确认 |
+| **下一步建议（P0）** | host 真机 0.2.1-rc.2：空草稿 `{"stage":"suggest","draft":""}` 返回 `ok:true, engine:"0.2.2-m1", suggestion:"先按 P0 走：在输入框上方加一行建议条，点击后填入草稿但不发送。"`（内容来自最近对话）；非空 draft 返回 400；`normalizeSuggestion` 11 项离线用例（标签/引号/围栏/折行/截断/空值）。客户端：建议条出现、Tab 把文本填进草稿、未自动发送——用户页面实测确认 | ✅ |
+| **内联 ghost（P1）** | `conversation.input.overlay` 灰色单行 ghost：composer 聚焦时显示、失焦退回建议条；几何量测公开锚点 `[data-composer-card]` + `contenteditable`，卡背景遮住 shell placeholder；Tab/键帽采纳复用 P0 路径。构建产物含 ghost 注册与样式，服务端 bundle 已更新；待页面确认观感 | ⏳ 待 UI 确认 |
 | **会话接地补全** | 修前 `recentTurns` 只拿到 assistant 轮次（`user/message` 的 `data` 就是消息本体，旧代码只读 `data.message`）；修后真机 `contextUsed` 含 `recentTurns`，离线用例锁定 canonical user/assistant 事件形状 | ✅ |
 | 产物已提交，安装不需构建 | `package.json.files` 含 `lib/`；git 安装后 `node_modules/dsh-composer-enhance/lib/client.js` 首行即 loader envelope | ✅ |
 | 构建可复现 | 从 GitHub 全新 `git clone` → `pnpm install` → `pnpm run build`，产物与仓库里提交的 `lib/index.js`、`lib/client.js` **逐字节相同**；73 项测试在克隆产物上全过 | ✅ |

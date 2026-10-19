@@ -1,11 +1,14 @@
 /**
  * dsh-composer-enhance — browser half, entry point.
  *
- * Two slot registrations, one shared per-Session flow:
+ * Three slot registrations, one shared per-Session flow:
  *
  *   conversation.input.right  the ✨ button, order 10. This slot renders
  *                             immediately before the model seat, so the button
  *                             lands left of the model selector, on the same row.
+ *   conversation.input.overlay  the inline gray ghost (P1), order 5 — drawn
+ *                             inside the composer card over the shell placeholder
+ *                             while the draft is empty and the card is focused.
  *   conversation.input.dock   order 5 — the dock above the composer card, where
  *                             TodoDock (0) and QueueDock (20) already sit, so a
  *                             chips row, question panel, or next-message
@@ -14,13 +17,13 @@
  *                             hosts activity/usage/devflow rows — so the dock
  *                             above the card stays ours.)
  *
- * Both occupants render the same store slice, so a pick in the dock is visible
+ * All occupants render the same store slice, so a pick in the dock is visible
  * to the button without prop threading.
  */
 import { installStyles } from "./styles";
 import type { ReactNode } from "react";
 
-import { EnhanceButton, EnhanceDock, type SlotProps, type Store } from "./ui";
+import { EnhanceButton, EnhanceDock, SuggestGhost, type SlotProps, type Store } from "./ui";
 
 /** Plugin id, also the label every slot registration carries. */
 const PLUGIN_ID = "dsh-composer-enhance";
@@ -104,6 +107,19 @@ export function apply(ctx: ClientContext): void {
 			id: `${PLUGIN_ID}-dock`,
 			order: 5
 		}, wrap(EnhanceDock));
+	});
+
+	// P1: the inline gray ghost sits inside the composer card, over the shell's
+	// own placeholder (the only place a "in-box" suggestion can be drawn: DSH
+	// gives plugins no editor/caret access). Order 5 keeps it beside the shipped
+	// slash menu/command popup cells without replacing any of them.
+	slots.inject("conversation.input.overlay", () => {
+		slots.register({
+			name: "conversation.input.overlay",
+			id: `${PLUGIN_ID}-ghost`,
+			order: 5,
+			label: "✨"
+		}, wrap(SuggestGhost));
 	});
 }
 
