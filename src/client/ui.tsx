@@ -11,10 +11,10 @@ import type { TagTone } from "@deepseek-ai/dsh-client-ui-primitives";
 import {
 	Button,
 	Checkbox,
-	IconCloseOutline16,
-	IconLoadingOutline16,
-	IconSparkle16,
-	IconWarningOutline16,
+	IconCloseOutlineRegular,
+	IconLoadingOutlineRegular,
+	IconSparkleRegular,
+	IconWarningOutlineRegular,
 	Input,
 	Pill,
 	Tag,
@@ -253,7 +253,7 @@ export function EnhanceButton(props: SlotProps) {
 				variant="ghost"
 				size="sm"
 				type="button"
-				icon={<IconSparkle16 size={14} />}
+				icon={<IconSparkleRegular size={14} />}
 				aria-label={label}
 				aria-busy={busy ? "true" : undefined}
 				data-dshce="button"
@@ -289,7 +289,7 @@ function CloseButton({ label, onClick }: { label: string; onClick: () => void })
 			variant="ghost"
 			size="sm"
 			type="button"
-			icon={<IconCloseOutline16 size={14} />}
+			icon={<IconCloseOutlineRegular size={14} />}
 			aria-label={label}
 			data-dshce="close"
 			onClick={onClick}
@@ -322,7 +322,7 @@ function ResultBar(
 		<div className="dshce-card" data-dshce="result" data-slow={state.slowPhase}>
 			<div className="dshce-body">
 				<div className="dshce-row">
-					<span className="dshce-lead"><IconSparkle16 size={14} /></span>
+					<span className="dshce-lead"><IconSparkleRegular size={14} /></span>
 					<span className="dshce-title">{t.enhanced}</span>
 					<span className="dshce-spacer" />
 					{state.slowPhase === "applied"
@@ -397,7 +397,7 @@ function ChipsRow({ state, t, store }: { state: FlowState; t: Copy; store: FlowS
 		<div className="dshce-card" data-dshce="chips">
 			<div className="dshce-body">
 				<div className="dshce-row">
-					<span className="dshce-lead"><IconSparkle16 size={14} /></span>
+					<span className="dshce-lead"><IconSparkleRegular size={14} /></span>
 					<span className="dshce-sub" title={state.reason}>{state.reason}</span>
 					<CloseButton label={t.cancel} onClick={() => store.cancel()} />
 				</div>
@@ -450,7 +450,7 @@ function QuestionPanel({ state, t, store }: { state: FlowState; t: Copy; store: 
 		<div className="dshce-card" data-dshce="panel">
 			<div className="dshce-body dshce-bodyScroll">
 				<div className="dshce-row">
-					<span className="dshce-lead"><IconSparkle16 size={14} /></span>
+					<span className="dshce-lead"><IconSparkleRegular size={14} /></span>
 					<span className="dshce-title">{t.needConfirm}</span>
 					<span className="dshce-sub" title={state.reason}>{state.reason}</span>
 					<CloseButton label={t.cancel} onClick={() => store.cancel()} />
@@ -521,8 +521,8 @@ function StatusLine(
 			<div className="dshce-body">
 				<div className="dshce-row">
 					{tone === "busy"
-						? <span className="dshce-spin"><IconLoadingOutline16 size={14} /></span>
-						: <span className="dshce-lead"><IconWarningOutline16 size={14} /></span>}
+						? <span className="dshce-spin"><IconLoadingOutlineRegular size={14} /></span>
+						: <span className="dshce-lead"><IconWarningOutlineRegular size={14} /></span>}
 					<p className="dshce-status" data-tone={tone} role={tone === "error" ? "alert" : undefined}>{text}</p>
 					<CloseButton label={tone === "busy" ? t.cancel : t.close} onClick={onClose} />
 				</div>
