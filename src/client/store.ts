@@ -21,12 +21,14 @@ import {
 	MAX_GATE_ROUNDS,
 	ROUTE,
 	SLOW_WINDOW_MS,
+	SUGGESTION_TTL_MS,
 	chipQuestionEcho,
 	normalizeAssumptions,
 	normalizeChips,
 	normalizeGate,
 	normalizeIssues,
 	normalizeQuestions,
+	normalizeSuggestion,
 	type ChipOption,
 	type EnhanceRequest,
 	type EnhanceResult,
@@ -48,6 +50,9 @@ export type FlowStatus = "idle" | "gating" | "writing" | "chips" | "panel" | "do
 
 /** Where the slow review stands. */
 export type SlowPhase = "none" | "running" | "offered" | "applied";
+
+/** Where the next-message suggestion stands. */
+export type SuggestStatus = "none" | "loading" | "shown";
 
 /** Everything both slot components render from. */
 export interface FlowState {
@@ -87,11 +92,25 @@ export interface FlowState {
 	slowAssumptions: string[];
 	/** How many changes the slower version reports; drives the offer line. */
 	slowCount: number;
+
+	/**
+	 * Next-message suggestion for an empty draft (P0 of the Web suggestion UX).
+	 * It is a projection of the dock, not a flow: it never owns the draft until
+	 * the user accepts, and it is invalidated by every draft/phase change.
+	 */
+	suggestStatus: SuggestStatus;
+	suggestion: string;
+	/** The draft revision the suggestion was generated against; accept CAS's on it. */
+	suggestRev: number;
 }
 
 /** The composer actions a slot component receives. */
 export interface InputActions {
 	setDraft?: (draft: string) => void;
+	/** Guarded selection capture (`InputActions.captureInsertion`). */
+	captureInsertion?: () => { start: number; end: number; draftRev: number };
+	/** Revision-guarded one-undo-step insertion (`InputActions.insertText`). */
+	insertText?: (text: string, span: { start: number; end: number; draftRev: number }) => boolean;
 }
 
 /** The framework shares a slot component hands to the store. */
@@ -123,6 +142,16 @@ export interface FlowStore {
 	restoreFast(): void;
 	/** Hide the offer line without touching the draft. */
 	dismissSlowOffer(): void;
+	/** Feed the Session's running/blank/visibility facts; the trigger edge lives here. */
+	observeIdle(input: { running: boolean; blank: boolean; visible: boolean }): void;
+	/** A visibility change re-runs the scheduling without new Session facts. */
+	refreshIdle(): void;
+	/** Take the shown suggestion into the draft (CAS on `suggestRev`). */
+	acceptSuggestion(): boolean;
+	/** Drop the shown/loading suggestion and start (or extend) its suppression. */
+	dismissSuggestion(): void;
+	/** Stop suggestion work when the slot unmounts. */
+	suspend(): void;
 	sync(facts: DraftFacts): void;
 }
 
@@ -142,6 +171,13 @@ const NO_SLOW: Pick<
 	slowIssues: [],
 	slowAssumptions: [],
 	slowCount: 0
+};
+
+/** The suggestion fields at rest. */
+const NO_SUGGEST: Pick<FlowState, "suggestStatus" | "suggestion" | "suggestRev"> = {
+	suggestStatus: "none",
+	suggestion: "",
+	suggestRev: 0
 };
 
 /**
@@ -172,6 +208,17 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 	/** The slow review's own handle: it must never cancel the fast request. */
 	let slowInFlight: AbortController | null = null;
 	let noticeTimer: ReturnType<typeof setTimeout> | null = null;
+	/** Next-message suggestion: debounce, in-flight, and suppression clocks. */
+	let suggestTimer: ReturnType<typeof setTimeout> | null = null;
+	let suggestExpiry: ReturnType<typeof setTimeout> | null = null;
+	let suggestInFlight: AbortController | null = null;
+	let lastRunning = false;
+	let sawTurn = false;
+	let idleInput: { running: boolean; blank: boolean; visible: boolean } = { running: false, blank: true, visible: true };
+	let lastSuggestAt = 0;
+	let suggestSuppressUntil = 0;
+	let suggestCooldownUntil = 0;
+	let suggestDismissals = 0;
 
 	const state: FlowState = {
 		status: "idle",
@@ -190,7 +237,8 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		errorMessage: "",
 		rounds: 0,
 		facts: NO_FACTS,
-		...NO_SLOW
+		...NO_SLOW,
+		...NO_SUGGEST
 	};
 
 	// React compares successive getSnapshot() results with Object.is, so the
@@ -714,6 +762,197 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		patch({ ...NO_SLOW });
 	};
 
+	// --- next-message suggestion (P0, empty draft only) ----------------------
+	//
+	// A row above the composer proposes the user's likely next message. It is
+	// never written into the draft implicitly: accept writes exactly once and
+	// never submits. The trigger is the running true→false edge reported by the
+	// slot; the store owns debounce, single-flight, CAS, suppression, and TTL.
+	const SUGGEST_DEBOUNCE_MS = 700;
+	const SUGGEST_MIN_INTERVAL_MS = 10_000;
+	const SUGGEST_SUPPRESS_MS = 60_000;
+	const SUGGEST_COOLDOWN_MS = 10 * 60_000;
+	const SUGGEST_DISMISS_LIMIT = 5;
+
+	const clearSuggestTimers = (): void => {
+		if (suggestTimer !== null) clearTimeout(suggestTimer);
+		if (suggestExpiry !== null) clearTimeout(suggestExpiry);
+		suggestTimer = null;
+		suggestExpiry = null;
+	};
+
+	const abortSuggestRequest = (): void => {
+		const controller = suggestInFlight;
+		suggestInFlight = null;
+		if (controller === null) return;
+		try {
+			controller.abort();
+		} catch {
+			/* already settled */
+		}
+	};
+
+	/** Retire the suggestion (shown or loading) without touching the draft. */
+	const dropSuggestion = (): void => {
+		clearSuggestTimers();
+		abortSuggestRequest();
+		if (state.suggestStatus !== "none" || state.suggestion !== "") patch({ ...NO_SUGGEST });
+	};
+
+	const suggestionWanted = (): boolean => {
+		if (!sawTurn) return false;
+		if (idleInput.running || idleInput.blank || !idleInput.visible) return false;
+		if (state.suggestStatus !== "none" || state.status !== "idle") return false;
+		const facts = state.facts;
+		if (facts.draft.trim() !== "" || facts.phase !== "plain") return false;
+		if (facts.refCount > 0 || facts.attachmentCount > 0) return false;
+		const now = Date.now();
+		if (now < suggestSuppressUntil || now < suggestCooldownUntil) return false;
+		return now - lastSuggestAt >= SUGGEST_MIN_INTERVAL_MS;
+	};
+
+	const scheduleSuggestion = (): void => {
+		if (suggestTimer !== null || !suggestionWanted()) return;
+		suggestTimer = setTimeout(() => {
+			suggestTimer = null;
+			// Re-check at fire time: the composer may have changed during the debounce.
+			if (suggestionWanted()) void requestSuggestion();
+		}, SUGGEST_DEBOUNCE_MS);
+	};
+
+	const requestSuggestion = async (): Promise<void> => {
+		const rev = state.facts.draftRev;
+		const controller = new AbortController();
+		suggestInFlight = controller;
+		lastSuggestAt = Date.now();
+		patch({ suggestStatus: "loading", suggestion: "", suggestRev: rev });
+		let result: EnhanceResult;
+		try {
+			const response = await fetch(ROUTE, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					sessionId: scope.sessionId ?? "",
+					stage: "suggest",
+					draft: ""
+				} satisfies EnhanceRequest),
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				if (suggestInFlight === controller) {
+					suggestInFlight = null;
+					dropSuggestion();
+				}
+				return;
+			}
+			result = await response.json() as EnhanceResult;
+		} catch {
+			// Suggestion generation is best-effort and silent: an old host answers
+			// `bad-request` for the unknown stage, and that must look like "no row".
+			if (suggestInFlight === controller) {
+				suggestInFlight = null;
+				dropSuggestion();
+			}
+			return;
+		}
+		if (suggestInFlight !== controller) return;
+		suggestInFlight = null;
+		if (state.suggestStatus !== "loading") return;
+		const facts = state.facts;
+		if (facts.draft.trim() !== "" || facts.draftRev !== rev || facts.phase !== "plain" || idleInput.running) {
+			dropSuggestion();
+			return;
+		}
+		if (result.ok !== true) {
+			dropSuggestion();
+			return;
+		}
+		const text = normalizeSuggestion(result.suggestion);
+		if (text === "") {
+			dropSuggestion();
+			return;
+		}
+		patch({ suggestStatus: "shown", suggestion: text, suggestRev: rev });
+		if (suggestExpiry !== null) clearTimeout(suggestExpiry);
+		suggestExpiry = setTimeout(() => {
+			suggestExpiry = null;
+			if (state.suggestStatus === "shown") dropSuggestion();
+		}, SUGGESTION_TTL_MS);
+	};
+
+	const observeIdle = (input: { running: boolean; blank: boolean; visible: boolean }): void => {
+		const turned = lastRunning && !input.running;
+		lastRunning = input.running;
+		idleInput = input;
+		if (turned) sawTurn = true;
+		if (input.running) {
+			// Sending a message invalidates whatever the row was showing.
+			dropSuggestion();
+			return;
+		}
+		if (!input.visible) {
+			dropSuggestion();
+			return;
+		}
+		scheduleSuggestion();
+	};
+
+	const refreshIdle = (): void => observeIdle(idleInput);
+
+	const acceptSuggestion = (): boolean => {
+		if (state.suggestStatus !== "shown") return false;
+		const rev = state.suggestRev;
+		const facts = state.facts;
+		if (facts.draft.trim() !== "" || facts.phase !== "plain" || facts.draftRev !== rev) {
+			dropSuggestion();
+			return false;
+		}
+		const text = state.suggestion;
+		if (text === "") return false;
+		const actions = scope.inputActions;
+		let applied = false;
+		try {
+			if (typeof actions?.captureInsertion === "function" && typeof actions.insertText === "function") {
+				// One undo step, CAS'd on the live revision: a stale span returns false
+				// and the accept is abandoned instead of overwriting the user's text.
+				const span = actions.captureInsertion();
+				applied = span.draftRev === rev && actions.insertText(text, span) === true;
+			} else if (typeof actions?.setDraft === "function") {
+				actions.setDraft(text);
+				applied = true;
+			}
+		} catch {
+			// The editor refused mid-flight (locked/detached): treat it as a miss,
+			// never as a reason to write a fallback.
+			applied = false;
+		}
+		if (!applied) {
+			dropSuggestion();
+			return false;
+		}
+		suggestDismissals = 0;
+		suggestSuppressUntil = 0;
+		dropSuggestion();
+		return true;
+	};
+
+	const dismissSuggestion = (): void => {
+		if (state.suggestStatus === "none") return;
+		suggestDismissals += 1;
+		suggestSuppressUntil = Date.now() + SUGGEST_SUPPRESS_MS;
+		if (suggestDismissals >= SUGGEST_DISMISS_LIMIT) {
+			suggestDismissals = 0;
+			suggestCooldownUntil = Date.now() + SUGGEST_COOLDOWN_MS;
+		}
+		dropSuggestion();
+	};
+
+	const suspend = (): void => {
+		dropSuggestion();
+		sawTurn = false;
+		lastRunning = false;
+	};
+
 	return {
 		getSnapshot: () => snapshot,
 		subscribe(listener) {
@@ -759,6 +998,11 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		applySlow: applyOfferedSlow,
 		restoreFast,
 		dismissSlowOffer,
+		observeIdle,
+		refreshIdle,
+		acceptSuggestion,
+		dismissSuggestion,
+		suspend,
 		sync(facts) {
 			const previous = state.facts;
 			const unchanged = previous.draft === facts.draft
@@ -781,6 +1025,17 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 			if (live && facts.draft !== state.baselineDraft) {
 				cancel();
 				return;
+			}
+			// A suggestion only exists for an empty, plain composer. Any edit, busy
+			// phase, attachment, or reference retires it; a later idle pass may ask
+			// again (subject to the suppression clocks).
+			if (state.suggestStatus !== "none") {
+				const stale = facts.draft.trim() !== "" || facts.draftRev !== state.suggestRev
+					|| facts.phase !== "plain" || facts.refCount > 0 || facts.attachmentCount > 0;
+				if (stale) {
+					dropSuggestion();
+					return;
+				}
 			}
 			emit();
 		}

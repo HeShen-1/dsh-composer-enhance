@@ -98,6 +98,23 @@ const knownPrefix = m.parseRewrite(`${P.MARK_DRAFT}\nA\n${P.MARK_ISSUES}\n- note
 ok("rewrite: unlisted but well-formed kind keeps only the body", knownPrefix.issues[0].kind === "clarified" && knownPrefix.issues[0].text === "dropped prefix");
 ok("rewrite: bullet variants accepted", m.parseRewrite(`${P.MARK_DRAFT}\nA\n${P.MARK_ISSUES}\n• added: x\n* clarified: y\n`)?.issues.length === 2);
 
+// --- normalizeSuggestion: one line, or nothing -----------------------------
+// The suggestion row is a single truncated line; the host contract strips every
+// decoration a model adds, so the client never has to guess.
+ok("suggest: plain text kept", m.normalizeSuggestion("把 README 的安装章节改名") === "把 README 的安装章节改名");
+ok("suggest: Chinese label dropped", m.normalizeSuggestion("建议：继续实现插件") === "继续实现插件");
+ok("suggest: English label dropped", m.normalizeSuggestion("Suggestion: run the tests") === "run the tests");
+ok("suggest: straight quotes stripped", m.normalizeSuggestion('"帮我补测试"') === "帮我补测试");
+ok("suggest: CJK quotes stripped", m.normalizeSuggestion("“帮我补测试”") === "帮我补测试");
+ok("suggest: corner quotes stripped", m.normalizeSuggestion("「帮我补测试」") === "帮我补测试");
+ok("suggest: fences stripped", m.normalizeSuggestion("```text\n跑一遍测试\n```") === "跑一遍测试");
+ok("suggest: newlines folded to one line", m.normalizeSuggestion("第一行\n第二行") === "第一行 第二行");
+ok("suggest: whitespace-only stays empty", m.normalizeSuggestion("   \n ") === "");
+ok("suggest: empty quote pair becomes empty", m.normalizeSuggestion('""') === "");
+ok("suggest: non-string input stays empty", m.normalizeSuggestion(undefined) === "" && m.normalizeSuggestion(42) === "");
+const longSuggestion = m.normalizeSuggestion("字".repeat(400));
+ok("suggest: over-long text is capped with an ellipsis", longSuggestion.length === m.MAX_SUGGESTION_CHARS + 1 && longSuggestion.endsWith("…"));
+
 // --- resolveRoute: which service actually carries the model selection ------
 // The live host (dsh 0.2.1-rc.2) has no `settings.get("agent-default-model")`
 // key. A session selection lives in the `modelSelection` projection, read
@@ -170,7 +187,8 @@ ok("route: a half-configured pair is ignored, not used as a route", partialConfi
 ok("exports: name", m.name === "composer-enhance");
 ok("exports: injects llm", Array.isArray(m.inject) && m.inject.includes("llm"));
 ok("exports: route path", m.ROUTE_PATH === "/dsh-composer-enhance/enhance");
-ok("exports: prompts present", typeof P.GATE_SYSTEM === "string" && typeof P.REWRITE_SYSTEM === "string" && typeof P.SLOW_SYSTEM === "string");
+ok("exports: prompts present", typeof P.GATE_SYSTEM === "string" && typeof P.REWRITE_SYSTEM === "string" && typeof P.SLOW_SYSTEM === "string" && typeof P.SUGGEST_SYSTEM === "string");
+ok("exports: suggest prompt has a config default", typeof m.CONFIG_DEFAULTS.suggestPrompt === "string" && m.CONFIG_DEFAULTS.suggestPrompt === "");
 
 process.stdout.write(`host-smoke: ${pass} passed, ${failures.length} failed\n`);
 for (const name of failures) process.stdout.write(`  FAIL ${name}\n`);

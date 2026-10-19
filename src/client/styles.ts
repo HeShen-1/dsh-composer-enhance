@@ -52,6 +52,12 @@ const CSS = [
 	// it is untouched, so this reads as a suggestion, not as a result.
 	".dshce-offer{display:flex;align-items:center;gap:8px;min-width:0;margin-top:2px;padding-top:6px;border-top:.5px solid var(--dsw-alias-border-l1)}",
 	".dshce-offerText{min-width:0;color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;flex:none;font-size:12px;line-height:20px}",
+	// The next-message suggestion row: quieter than a result, one line, with the
+	// accept keycap visible so the Tab affordance is discoverable.
+	".dshce-suggest{background:var(--dsw-specific-tip)}",
+	".dshce-suggestText{min-width:0;color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;overflow:hidden;flex:auto;font-size:13px;line-height:20px}",
+	".dshce-suggestLabel{color:var(--dsw-alias-label-caption);margin-right:2px}",
+	".dshce-kbd{margin-left:6px;padding:0 4px;border:.5px solid var(--dsw-alias-border-l1);border-radius:4px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-tertiary);font-family:inherit;font-size:11px;line-height:16px}",
 	".dshce-question{display:flex;flex-direction:column;gap:4px;min-width:0}",
 	".dshce-qhead{color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;line-height:16px}",
 	".dshce-qtext{margin:0;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}",

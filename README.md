@@ -6,6 +6,18 @@ DeepSeek Harness Web 的**输入框提示词增强**插件。
 
 它是**原生 DSH 插件**：TypeScript 源码 + 构建产物、`dsh.client` 声明、`cordis.patch.yml` bundle 层、用 `plugin_manager` 安装与启停。不手改 profile、不建 symlink。
 
+### 下一步建议（Web 端 P0）
+
+空草稿时，一轮回复结束（Session `running` true→false）且页面可见，插件会请求一条「你接下来最可能发的一条消息」，
+在输入框上方渲染一行建议条（`conversation.input.dock`）：
+
+- **采用**：点「采用」或按 **Tab**（仅 composer 聚焦、无弹层、非 IME 时拦截；不确定就放行）。
+  只把文本写进草稿（一次撤销步），**不自动发送**；光标留在文本末尾，按 Enter 由你决定。
+- **拒绝**：点 × 或 Esc；开始打字、发送、切会话、隐藏页面都会立即作废。
+- 静默失败，不打扰。
+
+设计依据与限制见 [docs/design-web-suggestion-ux.md](docs/design-web-suggestion-ux.md)（内联 ghost 是 P1，P0 只做建议条）。
+
 ---
 
 ## 安装
@@ -80,6 +92,7 @@ plugin_manager  remove_bundle  dsh-composer-enhance
     gatePrompt: ""                # 留空用内置默认
     rewritePrompt: ""
     slowPrompt: ""
+    suggestPrompt: ""             # 下一步建议的 prompt；留空用内置默认
 ```
 
 推理档的合法值是 `off | low | high | max`（来自 deepseek 适配器，已核对源码）。留空 `gatePrompt`/`rewritePrompt`/`slowPrompt` 即用内置默认。
@@ -101,7 +114,7 @@ plugin_manager  remove_bundle  dsh-composer-enhance
 > 于是每次请求都落到 `no-route`（"没有可用的模型路由"）。路由修复见
 > `src/index.ts` 的 `resolveRoute` 与 `test/host-smoke.mjs` 的路由用例。
 
-快轨与慢轨**用同一条路由、不同推理档**，所以不需要配置第二条模型。
+快轨、慢轨与 suggest **用同一条路由、不同推理档**（suggest 走 `fastEffort`），所以不需要配置第二条模型。
 
 ---
 
@@ -120,8 +133,8 @@ pnpm run typecheck
 ```bash
 pnpm test                      # 四个全跑，顺序如下
 node test/grounding-smoke.mjs  # 16 项：会话接地（最近几轮 + 项目指令）
-node test/handler-smoke.mjs    # 27 项：请求级状态机（关键：一次请求调几次模型）
-node test/host-smoke.mjs       # 46 项：路由解析、配置归一化与 gate 解析
+node test/handler-smoke.mjs    # 36 项：请求级状态机（关键：一次请求调几次模型）
+node test/host-smoke.mjs       # 59 项：路由解析、配置归一化、suggest 与 gate 解析
 node test/parser-smoke.mjs     # 36 项：解析层 —— JSON 抠取（围栏/前后废话/字符串里的括号）、
                                #        gate 字段缺失与类型错的兜底、改写三段标记的降级
 ```
@@ -150,7 +163,7 @@ node test/parser-smoke.mjs     # 36 项：解析层 —— JSON 抠取（围栏/
 | `src/index.ts`（host） | **需要重启 `dsh web`**。实测探针：改完 30 秒仍未变（HMR 的 `ignored` 默认排除 `**/node_modules`，而插件是 profile 的 `link:` 依赖） |
 | 插件 `config:` 块 | patch 变更触发 recomposition，即时生效 |
 
-host 半部每次请求都会回一个 `engine` 字段（当前 `0.2.1-m1`）——行为看着没变时，先看它确认真机跑的是哪一版。
+host 半部每次请求都会回一个 `engine` 字段（当前 `0.2.2-m1`）——行为看着没变时，先看它确认真机跑的是哪一版。
 
 ---
 

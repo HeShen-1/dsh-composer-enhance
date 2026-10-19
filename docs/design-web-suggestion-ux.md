@@ -3,6 +3,11 @@
 > 结论先行：**做一个，但分两层交付**——P0 是输入框上方的一行「建议条」（点击采纳，Tab 作为增强键），P1 才是空草稿时输入框内的灰色 ghost 文本。
 > 原因：DSH Web 的 Lexical 编辑器不向插件暴露光标/选区/按键仲裁，真正的「内联补全」只有「空草稿 + 覆盖 placeholder」这一种可行形态；而一行提示条可以完整承载功能与无障碍，且不占私有 DOM。
 > 本文所有「公开扩展点」均按 dsh 0.2.1-rc.2 的实际契约与运行中 Slot 表核对，不是推测；推测处标〔推测〕。
+>
+> **实现状态（2026-10-19）**：P0 已实现。host 新增 `stage:"suggest"`（空草稿出建议、非空草稿 400），
+> 客户端在 `conversation.input.dock` 渲染建议条，「采用」走 `captureInsertion+insertText`（CAS，单撤销步），
+> Tab 拦截与点击同路径，不自动发送；防抖/单飞/抑制/冷却/TTL 在 store 里。真机 host 已返回
+> `engine:"0.2.2-m1"` 且建议内容贴合最近对话；P1 内联 ghost 仍为计划。
 
 ---
 
@@ -220,7 +225,7 @@ IDLE ──(session.running:true→false && draft=="" && !blank && visible)─�
 
 ## 8. 实施顺序
 
-1. **P0**（约 0.5–1 天）：host 加 `stage:"suggest"` + prompt；客户端 `conversation.input.dock` 建议条（点击采纳 + × + 冷却）；`insertText` 写入；`useSession.running` 触发；单飞/abort/CAS。
+1. ✅ **P0（已实现）**：host 加 `stage:"suggest"` + prompt（`normalizeSuggestion` 11 项离线用例）；客户端 `conversation.input.dock` 建议条（点击/Tab 采纳 + × + 冷却）；`insertText` 写入 + CAS；`useSession.running` 触发；单飞/abort/抑制/TTL。
 2. **P1**（约 1 天）：`conversation.input.overlay` ghost 层（`[data-composer-card]` 量测定位 + placeholder 遮罩）+ Tab capture 守卫 + 亮暗主题验收。
 3. **P2**（后续）：`settings.general.item` 开关行、provenance 徽标、CJK/IME 专项、频率参数配置化、若需要模型感知来源再扩 host 协议。
 

@@ -152,9 +152,27 @@ ok("no route: reports no-route", unrouted.body.ok === false && unrouted.body.rea
 ok("no route: makes no model call", unrouted.calls === 0);
 ok("no route: message explains what is missing", typeof unrouted.body.message === "string" && unrouted.body.message.includes("provider/model"));
 
+// --- suggest stage: empty draft → one suggestion, no gate ------------------
+const suggest = await run({ draft: "", sessionId: "", stage: "suggest" }, ["建议：把安装章节改成只保留 pnpm 一种方式"]);
+ok("suggest: one model call", suggest.calls === 1);
+ok("suggest: ok with the suggest stage", suggest.body.ok === true && suggest.body.stage === "suggest");
+ok("suggest: response text is normalized", suggest.body.suggestion === "把安装章节改成只保留 pnpm 一种方式");
+ok("suggest: uses the suggest prompt", suggest.sent[0].system === P.SUGGEST_SYSTEM);
+ok("suggest: carries the build marker", suggest.body.engine === "0.2.2-m1");
+ok("suggest: no draft or gate fields", suggest.body.draft === undefined && suggest.body.gate === undefined);
+
+const emptySuggest = await run({ draft: "", sessionId: "", stage: "suggest" }, ["   "]);
+ok("suggest: empty model output is empty-result", emptySuggest.body.ok === false && emptySuggest.body.reason === "empty-result");
+
+const nonEmptySuggest = await run({ draft: "写个 API", sessionId: "", stage: "suggest" }, [REWRITE_TEXT]);
+ok("suggest: a non-empty draft is rejected without a model call", nonEmptySuggest.body.reason === "bad-request" && nonEmptySuggest.calls === 0);
+
+const noRouteSuggest = await run({ draft: "", sessionId: "", stage: "suggest" }, [REWRITE_TEXT], { agentDefaultModel: undefined });
+ok("suggest: no route is reported without a model call", noRouteSuggest.body.reason === "no-route" && noRouteSuggest.calls === 0);
+
 // --- every successful reply carries the build marker -----------------------
-ok("build marker on gate reply", first.body.engine === "0.2.1-m1");
-ok("build marker on rewrite reply", chipsReply.body.engine === "0.2.1-m1");
+ok("build marker on gate reply", first.body.engine === "0.2.2-m1");
+ok("build marker on rewrite reply", chipsReply.body.engine === "0.2.2-m1");
 
 process.stdout.write(`handler-smoke: ${pass} passed, ${failures.length} failed\n`);
 for (const name of failures) process.stdout.write(`  FAIL ${name}\n`);

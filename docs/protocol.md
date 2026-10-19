@@ -16,8 +16,8 @@ host 与 client 之间**唯一**的接口契约。两边都必须照此实现；
 ```jsonc
 {
   "sessionId": "string",          // 用于解析模型路由与读取会话上下文
-  "stage": "fast" | "slow",       // fast = effort 低档；slow = effort 高档复核
-  "draft": "string",              // 当前草稿原文；slow 阶段传的是快轨产出
+  "stage": "fast" | "slow" | "suggest", // fast = 低档；slow = 高档复核；suggest = 空草稿的下一步建议
+  "draft": "string",              // 当前草稿原文；slow 传快轨产出；suggest 必须是 ""
   "baselineDraft": "string",      // 仅 slow，用于让 host 判断客户端草稿是否已变（可选）
   "questions": [                  // 已问过的问题回显；没问过就是 []
     { "id": "q1", "question": "…", "options": [{ "label": "…", "recommended": true }] }
@@ -49,6 +49,9 @@ host 与 client 之间**唯一**的接口契约。两边都必须照此实现；
     ]
   },
 
+  // —— 下一步建议（仅 stage=suggest）——
+  "suggestion": "一条 ≤160 字的建议文本（单行，无引号/前缀）",
+
   // —— 改写结果（shape=none 或带 answers 时才有）——
   "draft": "改写后的正文",
   "issues": [ { "kind": "added" | "clarified" | "restructured" | "assumption", "text": "改了什么" } ],
@@ -60,6 +63,16 @@ host 与 client 之间**唯一**的接口契约。两边都必须照此实现；
   "route": { "provider": "…", "model": "…", "reasoningEffort": "…" }
 }
 ```
+
+### suggest 阶段（Web 建议条 P0）
+
+- 触发方：客户端在「一轮回复结束（`running` true→false）+ 草稿为空 + 非 blank 会话 + 页面可见」时请求；
+  host 只负责生成，不判断触发条件。
+- 请求：`{ "sessionId": "…", "stage": "suggest", "draft": "" }`；**非空 draft 一律 400 bad-request**。
+- 用最近对话 + 人设/项目约定接地，模型只输出一条文本；host 侧 `normalizeSuggestion()` 去掉围栏、引号、
+  「建议：」前缀、折行，并截断到 160 字。空结果返回 `ok:false, reason:"empty-result"`。
+- 客户端只在响应返回时草稿仍为空、`draftRev` 未变、`running === false` 时显示；否则丢弃。
+  采纳只写草稿（一次 `insertText`，不发送）；拒绝/打字/发送/切会话/隐藏页面都会作废它。
 
 `ok:false` 时：
 
@@ -117,3 +130,5 @@ host 遇到非空 `answers` 时**直接改写、不再过闸门**，所以不存
 | 请求体上限 | 16 MiB |
 | 慢轨自动替换窗口 | 30s（且草稿仍聚焦、未被编辑、issues 非空、文本确有变化）。8s 在真机上把自动替换这条分支实际关掉了：`effort: max` 实测延迟 1.2s–9.5s |
 | 慢轨触发条件 | **仅当本轮闸门确实问过**（客户端 `rounds > 0`，即走过 chips 或 panel）。真机 4 次复核的 issues 是 0/0/2/0——对无歧义草稿做复核多数时候没话说，不值得每次 ✨ 都付一次 `effort: max` |
+| 建议文本上限 | 160 字（host `MAX_SUGGESTION_CHARS`；客户端显示一行，2 行截断） |
+| 建议生成间隔 | 触发后 700ms 防抖；两次请求最小间隔 10s；显式拒绝后静默 60s；连续拒绝 5 次冷却 10 分钟；显示 TTL 60s |

@@ -95,7 +95,7 @@ export interface Issue {
 /** Request body. */
 export interface EnhanceRequest {
 	sessionId: string;
-	stage: "fast" | "slow";
+	stage: "fast" | "slow" | "suggest";
 	draft: string;
 	baselineDraft?: string;
 	questions?: GateQuestion[];
@@ -111,6 +111,8 @@ export interface EnhanceResult {
 	stage?: string;
 	gate?: Gate;
 	draft?: unknown;
+	/** One next-message suggestion (`stage:"suggest"` only). */
+	suggestion?: unknown;
 	issues?: unknown;
 	assumptions?: unknown;
 	contextUsed?: unknown;
@@ -127,6 +129,36 @@ export type FailureCode =
 	| "network"
 	| "aborted"
 	| "internal";
+
+/** Hard cap on one suggestion row (mirrors the host's `MAX_SUGGESTION_CHARS`). */
+export const MAX_SUGGESTION_CHARS = 160;
+
+/** How long one shown suggestion stays before it expires. */
+export const SUGGESTION_TTL_MS = 60_000;
+
+/**
+ * Normalize one suggestion response.
+ *
+ * The host already normalizes, but an older host (or a proxy) may hand back raw
+ * model output; the row is a single line, so this keeps the client tolerant
+ * without letting a paragraph into the dock.
+ * @param value - response field.
+ * @returns one line, or an empty string when nothing usable survived.
+ */
+export function normalizeSuggestion(value: unknown): string {
+	let text = typeof value === "string" ? value.replace(/```(?:\w+)?/gu, "").trim() : "";
+	text = text.replace(/^(?:建议|下一条消息|下一条|suggestion|next prompt)\s*[:：]\s*/iu, "");
+	if (text.length >= 2) {
+		const first = text[0];
+		const last = text[text.length - 1];
+		if ((first === "\"" && last === "\"") || (first === "“" && last === "”") || (first === "「" && last === "」")) {
+			text = text.slice(1, -1).trim();
+		}
+	}
+	text = text.replace(/\s*\n+\s*/gu, " ").replace(/[ \t]{2,}/gu, " ").trim();
+	if (text.length > MAX_SUGGESTION_CHARS) text = `${text.slice(0, MAX_SUGGESTION_CHARS)}…`;
+	return text;
+}
 
 /** Coerce a chip list to the protocol cap, dropping entries without a label. */
 export function normalizeChips(value: unknown): ChipOption[] {

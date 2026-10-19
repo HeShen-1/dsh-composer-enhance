@@ -1,6 +1,6 @@
 /**
- * The plugin's React surfaces: the ✨ button, and everything the dock renders
- * while a flow is open (chips, question panel, progress, failure, change list).
+ * The plugin's React surfaces: the ✨ button, the dock (chips, question panel,
+ * progress, failure, change list), and the next-message suggestion row.
  *
  * Every control is a shipped primitive — `Button`, `Pill`, `Checkbox`, `Input`,
  * `Tag`, `Tooltip` and the shipped icons — so hover, focus, keyboard and theme
@@ -39,11 +39,19 @@ export interface Store<T> {
 	getSnapshot(): T;
 }
 
+/** The Session lifecycle facts the suggestion trigger reads. */
+export interface SessionFacts {
+	running?: boolean;
+	blank?: boolean;
+}
+
 /** Framework props handed to a slot occupant, plus the wrapper's locale store. */
 export interface SlotProps {
 	sessionId?: string;
 	inputActions?: InputActions;
 	useInput<T>(selector: (value: InputState) => T): T;
+	/** Session-scope standard prop: lifecycle/control state of the current Session. */
+	useSession?<T>(selector: (value: SessionFacts) => T): T;
 	__localeStore?: Store<string>;
 }
 
@@ -82,6 +90,10 @@ interface Copy {
 	slowOffer: (count: number) => string;
 	slowApply: string;
 	restoreFast: string;
+	/** Next-message suggestion row. */
+	suggestPrefix: string;
+	suggestAccept: string;
+	suggestDismiss: string;
 	kinds: Record<string, string>;
 	reasons: Record<string, string>;
 }
@@ -111,6 +123,9 @@ const COPY: Record<"en" | "zh", Copy> = {
 		slowOffer: (count) => `A stricter version is available (${count} changes)`,
 		slowApply: "Review & replace",
 		restoreFast: "Restore fast version",
+		suggestPrefix: "Suggestion: ",
+		suggestAccept: "Use",
+		suggestDismiss: "Dismiss suggestion",
 		kinds: { added: "added", clarified: "clarified", restructured: "restructured", assumption: "assumption" },
 		reasons: {
 			"no-route": "no model route is available",
@@ -147,6 +162,9 @@ const COPY: Record<"en" | "zh", Copy> = {
 		slowOffer: (count) => `更严格的版本可用（改了 ${count} 处）`,
 		slowApply: "查看/替换",
 		restoreFast: "还原到快轨版",
+		suggestPrefix: "建议：",
+		suggestAccept: "采用",
+		suggestDismiss: "关闭建议",
 		kinds: { added: "新增", clarified: "明确", restructured: "重组", assumption: "假设" },
 		reasons: {
 			"no-route": "没有可用的模型路由",
@@ -206,6 +224,7 @@ export function useFlow(props: SlotProps): { store: FlowStore; state: FlowState;
 	// cleanup after EVERY render, cancelling the flow the moment it starts.
 	useEffect(() => () => {
 		store.cancel();
+		store.suspend();
 	}, [store]);
 
 	return { store, state, t };
@@ -532,6 +551,76 @@ function StatusLine(
 }
 
 /**
+ * Whether a composer popup owns the keyboard right now.
+ *
+ * The slash menu, command popup, feedback dialog, and model menu live inside
+ * the composer card; while one is open Tab belongs to it. There is no public
+ * "popup open" API, so this DOM probe is deliberately conservative: if it
+ * cannot tell (no document), the caller must fail open and not intercept Tab.
+ * @returns whether a popup appears to be open.
+ */
+function composerPopupOpen(): boolean {
+	if (typeof document === "undefined") return true;
+	return document.querySelector(
+		'[data-composer-card] [role="listbox"], [data-composer-card] [role="menu"], '
+		+ '[data-composer-card] [role="dialog"], [data-composer-card] [aria-expanded="true"][aria-haspopup]'
+	) !== null;
+}
+
+/**
+ * Best-effort keyboard return to the composer after a click accept.
+ *
+ * `InputActions` has no `focus()`; a mousedown `preventDefault` keeps focus in
+ * the common case, and this fallback only runs when focus already left. Both
+ * anchors are public: the shell's own `data-composer-card` and the standard
+ * `contenteditable` attribute.
+ */
+function focusComposerIfNeeded(): void {
+	if (typeof document === "undefined") return;
+	const active = document.activeElement;
+	if (active instanceof Element && active.closest("[data-composer-card]") !== null) return;
+	const root = document.querySelector('[data-composer-card] [contenteditable="true"]');
+	if (root instanceof HTMLElement) root.focus();
+}
+
+/**
+ * The next-message suggestion row (P0 of the Web suggestion design).
+ * @param props.text - the suggestion.
+ * @param props.t - copy table.
+ * @param props.onAccept - write it into the draft (one step, no send).
+ * @param props.onDismiss - retire it and start the suppression clock.
+ */
+function SuggestionRow(
+	{ text, t, onAccept, onDismiss }: { text: string; t: Copy; onAccept: () => void; onDismiss: () => void }
+) {
+	return (
+		<div className="dshce-card dshce-suggest" data-dshce="suggest" role="status" aria-live="polite">
+			<div className="dshce-body">
+				<div className="dshce-row">
+					<span className="dshce-lead"><IconSparkleRegular size={14} /></span>
+					<span className="dshce-suggestText" title={text}>
+						<span className="dshce-suggestLabel">{t.suggestPrefix}</span>{text}
+					</span>
+					<span className="dshce-spacer" />
+					<Button
+						variant="ghost"
+						size="sm"
+						type="button"
+						aria-keyshortcuts="Tab"
+						data-dshce="suggest-accept"
+						onMouseDown={(event) => event.preventDefault()}
+						onClick={onAccept}
+					>
+						{t.suggestAccept}<kbd className="dshce-kbd">Tab</kbd>
+					</Button>
+					<CloseButton label={t.suggestDismiss} onClick={onDismiss} />
+				</div>
+			</div>
+		</div>
+	);
+}
+
+/**
  * The dock occupant: whichever surface the current status calls for, or nothing.
  * @param props - framework props of the `conversation.input.dock` slot.
  * @returns the panel element, or null when the flow owns no dock space.
@@ -540,16 +629,60 @@ export function EnhanceDock(props: SlotProps) {
 	const { store, state, t } = useFlow(props);
 	const status = state.status;
 
-	// Escape closes whatever the gate opened. Bound only while a gate is open, so
-	// the listener never competes with the composer's own Escape handling.
+	// Session lifecycle drives the suggestion trigger: the running true→false
+	// edge is "one turn ended", the only moment a next-message suggestion is
+	// worth paying a model call for. `blank` keeps brand-new Sessions quiet.
+	const running = props.useSession?.((value) => value.running === true) ?? false;
+	const blank = props.useSession?.((value) => value.blank === true) ?? true;
+
 	useEffect(() => {
-		if (status !== "chips" && status !== "panel") return;
+		const visible = typeof document === "undefined" || document.visibilityState === "visible";
+		store.observeIdle({ running, blank, visible });
+	}, [store, running, blank, state.facts.draft, state.facts.draftRev, state.facts.phase, status]);
+
+	useEffect(() => {
+		if (typeof document === "undefined") return;
+		const onVisibility = (): void => {
+			store.observeIdle({ running, blank, visible: document.visibilityState === "visible" });
+		};
+		document.addEventListener("visibilitychange", onVisibility);
+		return () => document.removeEventListener("visibilitychange", onVisibility);
+	}, [store, running, blank]);
+
+	const acceptSuggestion = useCallback((): void => {
+		if (store.acceptSuggestion()) focusComposerIfNeeded();
+	}, [store]);
+
+	// Tab accepts only while the row is visible, the composer owns focus, no
+	// popup is open, and the IME is not composing. A plain Tab cannot be
+	// registered as a shell shortcut (reserved / modifier-required), so this is
+	// the one keyboard path and every uncertain case fails open.
+	useEffect(() => {
+		if (state.suggestStatus !== "shown") return;
 		const onKeyDown = (event: KeyboardEvent): void => {
-			if (event.key === "Escape") store.cancel();
+			if (event.key !== "Tab" || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
+			if (event.isComposing || event.keyCode === 229) return;
+			const active = document.activeElement;
+			if (!(active instanceof Element) || active.closest("[data-composer-card]") === null) return;
+			if (composerPopupOpen()) return;
+			event.preventDefault();
+			acceptSuggestion();
+		};
+		window.addEventListener("keydown", onKeyDown, true);
+		return () => window.removeEventListener("keydown", onKeyDown, true);
+	}, [state.suggestStatus, acceptSuggestion]);
+
+	// Escape closes whatever the dock opened: the gate first, else the suggestion.
+	useEffect(() => {
+		if (status !== "chips" && status !== "panel" && state.suggestStatus !== "shown") return;
+		const onKeyDown = (event: KeyboardEvent): void => {
+			if (event.key !== "Escape") return;
+			if (status === "chips" || status === "panel") store.cancel();
+			else store.dismissSuggestion();
 		};
 		window.addEventListener("keydown", onKeyDown);
 		return () => window.removeEventListener("keydown", onKeyDown);
-	}, [status, store]);
+	}, [status, state.suggestStatus, store]);
 
 	if (status === "chips") return <ChipsRow state={state} t={t} store={store} />;
 	if (status === "panel") return <QuestionPanel state={state} t={t} store={store} />;
@@ -575,6 +708,16 @@ export function EnhanceDock(props: SlotProps) {
 				onApplySlow={() => store.applySlow()}
 				onDismissSlow={() => store.dismissSlowOffer()}
 				onClose={() => store.dismiss()}
+			/>
+		);
+	}
+	if (status === "idle" && state.suggestStatus === "shown") {
+		return (
+			<SuggestionRow
+				text={state.suggestion}
+				t={t}
+				onAccept={acceptSuggestion}
+				onDismiss={() => store.dismissSuggestion()}
 			/>
 		);
 	}

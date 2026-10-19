@@ -1,10 +1,11 @@
 /**
  * dsh-composer-enhance — host half.
  *
- * One exact route, two stages:
+ * One exact route, three stages:
  *
- *   stage=fast  ground → gate → (clarify) → rewrite, at `reasoningEffort: "off"`
- *   stage=slow  review the fast result at `reasoningEffort: "max"`
+ *   stage=fast     ground → gate → (clarify) → rewrite, at `reasoningEffort: "off"`
+ *   stage=slow     review the fast result at `reasoningEffort: "max"`
+ *   stage=suggest  one next-message suggestion for an EMPTY draft (Web suggestion row)
  *
  * The pipeline shape comes from what the published prior art actually does:
  * grounding before questioning (severity1/claude-code-prompt-improver requires
@@ -50,12 +51,14 @@ const DEFAULT_TIMEOUT_MS = 60_000;
  * to do nothing, this says whether the host answering the page is the build you
  * think it is.
  */
-const ENGINE = "0.2.1-m1";
+const ENGINE = "0.2.2-m1";
 
 /** Caps mirrored by docs/protocol.md; the client enforces the same numbers. */
 const MAX_QUESTIONS = 3;
 const MAX_OPTIONS = 5;
 const MAX_CHIPS = 4;
+/** Hard cap on one next-message suggestion, so a chatty model cannot flood the row. */
+export const MAX_SUGGESTION_CHARS = 160;
 
 /** Section names the assembled system prompt uses for the deployment persona. */
 const PERSONA_SECTIONS: readonly string[] = [
@@ -154,6 +157,7 @@ interface PluginConfig {
 	gatePrompt: string;
 	rewritePrompt: string;
 	slowPrompt: string;
+	suggestPrompt: string;
 	recentTurns: number;
 }
 
@@ -168,6 +172,7 @@ export const CONFIG_DEFAULTS: PluginConfig = {
 	gatePrompt: "",
 	rewritePrompt: "",
 	slowPrompt: "",
+	suggestPrompt: "",
 	recentTurns: 8
 };
 
@@ -197,6 +202,7 @@ function readConfig(raw: unknown): PluginConfig {
 		gatePrompt: text("gatePrompt", ""),
 		rewritePrompt: text("rewritePrompt", ""),
 		slowPrompt: text("slowPrompt", ""),
+		suggestPrompt: text("suggestPrompt", ""),
 		recentTurns: count("recentTurns", CONFIG_DEFAULTS.recentTurns)
 	};
 }
@@ -323,6 +329,21 @@ const SLOW_SYSTEM = [
 	"（每行一条 `- <kind>: <改了什么>`；没有实质问题就留空）",
 	MARK_ASSUMPTIONS,
 	"（每行一条；没有就留空）"
+].join("\n");
+
+const SUGGEST_SYSTEM = [
+	"你是「下一条消息建议器」。用户刚结束一轮对话，输入框是空的。",
+	"根据上面的上下文（最近的对话、用户人设/偏好、项目约定），写**一条**用户接下来最可能想发送的消息。",
+	"",
+	"规则：",
+	"1. 写的是**用户对助手说的话**，不是助手的回复；用用户自己的视角。",
+	"2. 必须具体、可直接发送：有明确对象/动作/验收，不写「继续」「好的」这类空话。",
+	"3. 中文草稿就用中文；上下文是英文就用英文。",
+	"4. 长度控制在 60 个字符以内（中文按字计），一行一条。",
+	"5. 不要解释、不要引号、不要 markdown、不要编号、不要「建议：」前缀。",
+	"6. 上下文不足以写出有价值的建议时，输出空字符串（什么都不输出），不要硬凑。",
+	"",
+	"只输出这一条消息的正文。"
 ].join("\n");
 
 // ---------------------------------------------------------------------------
@@ -480,6 +501,36 @@ export function parseRewrite(raw: string): Rewritten | undefined {
 	}
 
 	return { draft, issues, assumptions };
+}
+
+/**
+ * Normalize one next-message suggestion.
+ *
+ * Models decorate: fences, a "建议：" prefix, wrapping quotes, two lines where
+ * one was asked for. The client renders a single truncated row, so everything
+ * but the suggestion text itself is stripped here — one contract, testable
+ * offline, instead of every client path guessing.
+ * @param raw - model output.
+ * @returns one line, or an empty string when nothing usable survived.
+ */
+export function normalizeSuggestion(raw: unknown): string {
+	let text = typeof raw === "string" ? raw.replace(/```(?:\w+)?/gu, "") : "";
+	text = text.trim();
+	// A leading label the prompt told the model not to emit; tolerate it anyway.
+	text = text.replace(/^(?:建议|下一条消息|下一条|suggestion|next prompt)\s*[:：]\s*/iu, "");
+	// One wrapping pair of straight or CJK quotes.
+	if (text.length >= 2) {
+		const first = text[0];
+		const last = text[text.length - 1];
+		if ((first === "\"" && last === "\"") || (first === "“" && last === "”") || (first === "「" && last === "」")) {
+			text = text.slice(1, -1).trim();
+		}
+	}
+	// The row is one line: fold newlines and runs of whitespace.
+	text = text.replace(/\s*\n+\s*/gu, " ").replace(/[ \t]{2,}/gu, " ").trim();
+	if (text === "" || text === "\"\"" || text === "“”") return "";
+	if (text.length > MAX_SUGGESTION_CHARS) text = `${text.slice(0, MAX_SUGGESTION_CHARS)}…`;
+	return text;
 }
 
 // ---------------------------------------------------------------------------
@@ -812,13 +863,25 @@ export function createHandler(ctx: PluginContext, state: ConfigState): RouteHand
 		try {
 			const config = state.config;
 			const body = await readBody(req);
-			if (body === undefined || typeof body.draft !== "string" || body.draft.trim() === "") {
+			if (body === undefined) {
+				sendJson(res, 400, { ok: false, reason: "bad-request", message: "请求体不是合法的 JSON 对象。" });
+				return;
+			}
+
+			// The suggest stage is the one request that legitimately carries an EMPTY
+			// draft: it asks the host for the user's likely next message while the
+			// composer is empty. Every other stage still requires a draft.
+			const stage = body.stage === "slow" ? "slow" : body.stage === "suggest" ? "suggest" : "fast";
+			const draft = typeof body.draft === "string" ? body.draft : "";
+			if (stage === "suggest" && draft.trim() !== "") {
+				sendJson(res, 400, { ok: false, reason: "bad-request", message: "suggest 阶段只接受空草稿。" });
+				return;
+			}
+			if (stage !== "suggest" && draft.trim() === "") {
 				sendJson(res, 400, { ok: false, reason: "bad-request", message: "缺少非空的 draft。" });
 				return;
 			}
 
-			const draft = body.draft;
-			const stage = body.stage === "slow" ? "slow" : "fast";
 			const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
 			const route = resolveRoute(ctx, sessionId, stage === "slow" ? config.slowEffort : config.fastEffort, config);
 			if (route === undefined) {
@@ -835,6 +898,33 @@ export function createHandler(ctx: PluginContext, state: ConfigState): RouteHand
 			const groundingText = [grounding.text, sessionGrounding.text].filter((part) => part !== "").join("\n\n");
 			const contextUsed = [...grounding.used, ...sessionGrounding.used];
 			const preamble = groundingText === "" ? "" : `${GROUNDING_NOTE}\n\n${groundingText}\n\n---\n\n`;
+
+			// --- suggest stage: the user's likely next message --------------------
+			if (stage === "suggest") {
+				const output = await runModel(
+					ctx,
+					route,
+					config.suggestPrompt || SUGGEST_SYSTEM,
+					`${preamble}【任务】根据上面的对话，写用户接下来最可能发送的一条消息。`,
+					sessionId,
+					config.timeoutMs,
+					config.maxTokens
+				);
+				const suggestion = normalizeSuggestion(output);
+				if (suggestion === "") {
+					sendJson(res, 200, { ok: false, reason: "empty-result", message: "没有可用的下一条消息建议。" });
+					return;
+				}
+				sendJson(res, 200, {
+					ok: true,
+					engine: ENGINE,
+					stage,
+					suggestion,
+					contextUsed,
+					route: { provider: route.provider, model: route.model, reasoningEffort: route.reasoningEffort }
+				});
+				return;
+			}
 
 			// --- slow stage: review a result that already landed ------------------
 			if (stage === "slow") {
@@ -989,4 +1079,4 @@ export const inject = ["llm", "webServer"];
 
 /** Exposed for the offline test suite. */
 export const ROUTE_PATH = ROUTE;
-export const PROMPTS = { GATE_SYSTEM, REWRITE_SYSTEM, SLOW_SYSTEM, MARK_DRAFT, MARK_ISSUES, MARK_ASSUMPTIONS };
+export const PROMPTS = { GATE_SYSTEM, REWRITE_SYSTEM, SLOW_SYSTEM, SUGGEST_SYSTEM, MARK_DRAFT, MARK_ISSUES, MARK_ASSUMPTIONS };

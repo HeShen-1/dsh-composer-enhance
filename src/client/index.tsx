@@ -8,10 +8,11 @@
  *                             lands left of the model selector, on the same row.
  *   conversation.input.dock   order 5 — the dock above the composer card, where
  *                             TodoDock (0) and QueueDock (20) already sit, so a
- *                             chips row or question panel never covers the draft.
- *                             (`conversation.composer.dock` renders no marker in
- *                             this composition; the previous plugin verified that
- *                             live, and nothing registered there ever mounted.)
+ *                             chips row, question panel, or next-message
+ *                             suggestion never covers the draft.
+ *                             (`conversation.composer.dock` is also live — it
+ *                             hosts activity/usage/devflow rows — so the dock
+ *                             above the card stays ours.)
  *
  * Both occupants render the same store slice, so a pick in the dock is visible
  * to the button without prop threading.
