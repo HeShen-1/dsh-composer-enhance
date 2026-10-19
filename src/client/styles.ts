@@ -52,9 +52,11 @@ const CSS = [
 	// it is untouched, so this reads as a suggestion, not as a result.
 	".dshce-offer{display:flex;align-items:center;gap:8px;min-width:0;margin-top:2px;padding-top:6px;border-top:.5px solid var(--dsw-alias-border-l1)}",
 	".dshce-offerText{min-width:0;color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;flex:none;font-size:12px;line-height:20px}",
-	// The next-message suggestion row: quieter than a result, one line, with the
-	// accept keycap visible so the Tab affordance is discoverable.
-	".dshce-suggest{background:var(--dsw-specific-tip)}",
+	// The next-message suggestion row is a hint, not a result card: transparent and
+	// one compact line. The live page showed a full-width grey card reading much
+	// heavier than the one-line ghost it accompanied.
+	".dshce-suggest{background:transparent;border-color:transparent;box-shadow:none}",
+	".dshce-suggest .dshce-body{padding:2px 12px}",
 	".dshce-suggestText{min-width:0;color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;overflow:hidden;flex:auto;font-size:13px;line-height:20px}",
 	".dshce-suggestLabel{color:var(--dsw-alias-label-caption);margin-right:2px}",
 	".dshce-kbd{margin-left:6px;padding:0 4px;border:.5px solid var(--dsw-alias-border-l1);border-radius:4px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-tertiary);font-family:inherit;font-size:11px;line-height:16px}",
@@ -76,15 +78,23 @@ const CSS = [
 ].join("");
 
 /**
- * Inject the stylesheet once per page.
+ * Inject the stylesheet once per page, and REFRESH it when this module is
+ * re-evaluated by client HMR.
+ *
+ * The early-return version was a real bug: a hot bundle reload re-runs this
+ * module while the old `<style>` tag is still in the page, so every rule added
+ * by the new build was silently missing (observed live: the P1 ghost rendered
+ * unstyled because the sheet was still the P0 one).
  * @param doc - document to inject into; a missing one is a no-op.
  */
 export function installStyles(doc: Document | undefined): void {
 	if (doc === undefined) return;
-	if (doc.querySelector(`style[data-plugin-css="${STYLE_MARKER}"]`) !== null) return;
-	const tag = doc.createElement("style");
-	tag.dataset.plugin = STYLE_MARKER;
-	tag.dataset.pluginCss = STYLE_MARKER;
-	tag.textContent = CSS;
-	doc.head.appendChild(tag);
+	const existing = doc.querySelector(`style[data-plugin-css="${STYLE_MARKER}"]`);
+	const tag = existing instanceof HTMLStyleElement ? existing : doc.createElement("style");
+	if (existing === null) {
+		tag.dataset.plugin = STYLE_MARKER;
+		tag.dataset.pluginCss = STYLE_MARKER;
+		doc.head.appendChild(tag);
+	}
+	if (tag.textContent !== CSS) tag.textContent = CSS;
 }

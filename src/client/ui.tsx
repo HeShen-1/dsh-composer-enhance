@@ -7,6 +7,7 @@
  * behaviour come from the design system instead of from local artwork.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import type { CSSProperties } from "react";
 import type { TagTone } from "@deepseek-ai/dsh-client-ui-primitives";
 import {
 	Button,
@@ -628,7 +629,7 @@ function focusComposerIfNeeded(): void {
  * @returns the ghost element, or null when it must not show.
  */
 export function SuggestGhost(props: SlotProps) {
-	const { store, state } = useFlow(props);
+	const { store, state, t } = useFlow(props);
 	const draft = props.useInput((value) => value.draft);
 	const phase = props.useInput((value) => value.phase);
 	const attachmentCount = props.useInput((value) => value.attachmentIds?.length ?? 0);
@@ -688,19 +689,51 @@ export function SuggestGhost(props: SlotProps) {
 	}, [visible]);
 
 	if (!visible) return null;
+	// Critical layout lives INLINE on purpose: a hot bundle reload can leave the
+	// page's `<style>` tag stale (new classes missing), and an unsized, statically
+	// positioned ghost used to paint as a full-width block in the composer. Inline
+	// styles cannot go stale.
+	const ghostStyle: CSSProperties = {
+		position: "absolute",
+		top: geometry?.top ?? 0,
+		left: geometry?.left ?? 0,
+		right: 8,
+		zIndex: 1,
+		pointerEvents: "none",
+		whiteSpace: "nowrap",
+		overflow: "hidden",
+		lineHeight: "inherit",
+		background: "var(--dsw-specific-input-major)",
+		color: "var(--dsw-alias-label-caption)",
+		visibility: geometry === null ? "hidden" : "visible"
+	};
+	const ghostTextStyle: CSSProperties = {
+		display: "block",
+		whiteSpace: "nowrap",
+		overflow: "hidden",
+		textOverflow: "ellipsis",
+		paddingRight: 78
+	};
+	const keyStyle: CSSProperties = {
+		position: "absolute",
+		top: 2,
+		right: 30,
+		pointerEvents: "auto"
+	};
+	const closeStyle: CSSProperties = {
+		position: "absolute",
+		top: 2,
+		right: 4,
+		pointerEvents: "auto"
+	};
 	return (
-		<div
-			ref={rootRef}
-			className="dshce-ghost"
-			data-dshce="ghost"
-			style={{ top: geometry?.top ?? 0, left: geometry?.left ?? 0, visibility: geometry === null ? "hidden" : "visible" }}
-		>
-			<span className="dshce-ghostText">{state.suggestion}</span>
+		<div ref={rootRef} className="dshce-ghost" data-dshce="ghost" style={ghostStyle}>
+			<span className="dshce-ghostText" style={ghostTextStyle}>{state.suggestion}</span>
 			<button
 				type="button"
 				className="dshce-ghostKey"
+				style={keyStyle}
 				aria-keyshortcuts="Tab"
-				aria-label="Tab"
 				data-dshce="ghost-accept"
 				onMouseDown={(event) => event.preventDefault()}
 				onClick={() => {
@@ -709,43 +742,48 @@ export function SuggestGhost(props: SlotProps) {
 			>
 				Tab
 			</button>
+			<button
+				type="button"
+				className="dshce-ghostKey"
+				style={closeStyle}
+				aria-label={t.suggestDismiss}
+				data-dshce="ghost-dismiss"
+				onMouseDown={(event) => event.preventDefault()}
+				onClick={() => store.dismissSuggestion()}
+			>
+				×
+			</button>
 		</div>
 	);
 }
 
 /**
- * The next-message suggestion row.
- *
- * Full mode (composer unfocused) carries the whole suggestion; compact mode
- * (composer focused) runs beside the in-box ghost, so the text is not shown
- * twice — the ghost owns the words, the row owns the buttons.
+ * The next-message suggestion row, shown only while the composer is UNFOCUSED.
+ * When the composer has focus the in-box ghost carries the same suggestion, and
+ * this row stays out of the way instead of painting a full-width banner next to
+ * it (the live page showed that banner looking much heavier than the one-line
+ * ghost it accompanied).
  * @param props.text - the suggestion.
- * @param props.compact - hide the text because the in-box ghost shows it.
  * @param props.t - copy table.
  * @param props.onAccept - write it into the draft (one step, no send).
  * @param props.onDismiss - retire it and start the suppression clock.
  */
 function SuggestionRow(
-	{ text, compact, t, onAccept, onDismiss }: {
+	{ text, t, onAccept, onDismiss }: {
 		text: string;
-		compact: boolean;
 		t: Copy;
 		onAccept: () => void;
 		onDismiss: () => void;
 	}
 ) {
 	return (
-		<div className="dshce-card dshce-suggest" data-dshce="suggest" data-compact={compact ? "true" : undefined}>
+		<div className="dshce-card dshce-suggest" data-dshce="suggest">
 			<div className="dshce-body">
 				<div className="dshce-row">
 					<span className="dshce-lead"><IconSparkleRegular size={14} /></span>
-					{compact
-						? <span className="dshce-suggestLabel">{t.suggestTitle}</span>
-						: (
-							<span className="dshce-suggestText" title={text}>
-								<span className="dshce-suggestLabel">{t.suggestPrefix}</span>{text}
-							</span>
-						)}
+					<span className="dshce-suggestText" title={text}>
+						<span className="dshce-suggestLabel">{t.suggestPrefix}</span>{text}
+					</span>
 					<span className="dshce-spacer" />
 					<Button
 						variant="ghost"
@@ -859,11 +897,10 @@ export function EnhanceDock(props: SlotProps) {
 			/>
 		);
 	}
-	if (status === "idle" && state.suggestStatus === "shown") {
+	if (status === "idle" && state.suggestStatus === "shown" && !focused) {
 		return (
 			<SuggestionRow
 				text={state.suggestion}
-				compact={focused}
 				t={t}
 				onAccept={acceptSuggestion}
 				onDismiss={() => store.dismissSuggestion()}
