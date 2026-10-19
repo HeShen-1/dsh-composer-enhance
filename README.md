@@ -88,11 +88,18 @@ plugin_manager  remove_bundle  dsh-composer-enhance
 
 ## 模型路由
 
-`provider`/`model` 的解析顺序：
+`provider`/`model` 的解析顺序（已按 dsh 0.2.1 的真实 Host 契约核对）：
 
 1. 本插件 config 的 `provider` + `model`（两者都填才生效）
-2. 会话的 `modelSelection` 投影（`next` 优先，回退 `lastUsed`）
-3. `agent-default-model` 设置
+2. 会话的 `modelSelection` 投影 —— 先 `ctx.sessions.get(sessionId)` 拿活 Session，
+   再 `ctx.sessionProjections.snapshot(session, ["modelSelection"])`，取 `next ?? lastUsed`，
+   即输入框模型座位当前显示的那个
+3. `ctx.agentDefaultModel.currentSelection()`（`agent-default-model` 插件提供的部署默认）
+
+> 旧版第 2、3 步读的是 `ctx.sessionProjections.get(id, key)` 和
+> `ctx.settings.get("agent-default-model")` —— 这两个 API 在 dsh 0.2.1 都不存在，
+> 于是每次请求都落到 `no-route`（"没有可用的模型路由"）。路由修复见
+> `src/index.ts` 的 `resolveRoute` 与 `test/host-smoke.mjs` 的路由用例。
 
 快轨与慢轨**用同一条路由、不同推理档**，所以不需要配置第二条模型。
 
@@ -112,9 +119,9 @@ pnpm run typecheck
 
 ```bash
 pnpm test                      # 四个全跑，顺序如下
-node test/grounding-smoke.mjs  # 15 项：会话接地（最近几轮 + 项目指令）
-node test/handler-smoke.mjs    # 24 项：请求级状态机（关键：一次请求调几次模型）
-node test/host-smoke.mjs       # 34 项：路由、配置归一化与 gate 解析
+node test/grounding-smoke.mjs  # 16 项：会话接地（最近几轮 + 项目指令）
+node test/handler-smoke.mjs    # 27 项：请求级状态机（关键：一次请求调几次模型）
+node test/host-smoke.mjs       # 46 项：路由解析、配置归一化与 gate 解析
 node test/parser-smoke.mjs     # 36 项：解析层 —— JSON 抠取（围栏/前后废话/字符串里的括号）、
                                #        gate 字段缺失与类型错的兜底、改写三段标记的降级
 ```
@@ -143,7 +150,7 @@ node test/parser-smoke.mjs     # 36 项：解析层 —— JSON 抠取（围栏/
 | `src/index.ts`（host） | **需要重启 `dsh web`**。实测探针：改完 30 秒仍未变（HMR 的 `ignored` 默认排除 `**/node_modules`，而插件是 profile 的 `link:` 依赖） |
 | 插件 `config:` 块 | patch 变更触发 recomposition，即时生效 |
 
-host 半部每次请求都会回一个 `engine` 字段（当前 `0.2.0-m2`）——行为看着没变时，先看它确认真机跑的是哪一版。
+host 半部每次请求都会回一个 `engine` 字段（当前 `0.2.1-m1`）——行为看着没变时，先看它确认真机跑的是哪一版。
 
 ---
 

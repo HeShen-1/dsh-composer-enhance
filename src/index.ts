@@ -50,7 +50,7 @@ const DEFAULT_TIMEOUT_MS = 60_000;
  * to do nothing, this says whether the host answering the page is the build you
  * think it is.
  */
-const ENGINE = "0.2.0-m2";
+const ENGINE = "0.2.1-m1";
 
 /** Caps mirrored by docs/protocol.md; the client enforces the same numbers. */
 const MAX_QUESTIONS = 3;
@@ -94,6 +94,24 @@ interface LlmService {
 
 interface SystemPromptService {
 	assemble(context?: unknown): Promise<PromptAssembly>;
+}
+
+/** `ctx.agentDefaultModel` — the deployment default selection (base plugin). */
+interface AgentDefaultModelService {
+	currentSelection(): { provider?: unknown; model?: unknown; reasoningEffort?: unknown };
+}
+
+/** A live `Session`, as far as routing needs it: an opaque handle for projections. */
+type SessionHandle = object;
+
+/** `ctx.sessions` — the live session store. */
+interface SessionsService {
+	get?(id: string): SessionHandle | undefined;
+}
+
+/** `ctx.sessionProjections` read face — the wire snapshot of registered units. */
+interface SessionProjectionsService {
+	snapshot?(session: SessionHandle, keys: readonly string[]): { values?: Record<string, unknown> } | undefined;
 }
 
 interface WebServerService {
@@ -535,6 +553,27 @@ function messageText(message: unknown): string {
 }
 
 /**
+ * Extract the message payload from one surface event.
+ *
+ * Live `sessionQuery.readSurface` returns canonical session events, and their
+ * data shape differs by role: a `user/message` event's `data` IS the
+ * UserMessage, while an `assistant/message` event's `data` is
+ * `{turn, step, message, stream, …}` and carries the message one level down.
+ * Reading only `data.message` (the earlier code) drops every user turn, so the
+ * session grounding silently lost half the conversation.
+ * @param type - event type.
+ * @param row - event object with the optional compatibility `message` field.
+ * @returns the message payload, or undefined when the event carries none.
+ */
+function eventMessage(type: string, row: { message?: unknown; data?: unknown }): unknown {
+	if (row.message !== undefined) return row.message;
+	const data = row.data;
+	if (data === null || typeof data !== "object") return undefined;
+	if (type === "user/message") return data;
+	return (data as { message?: unknown }).message ?? data;
+}
+
+/**
  * Collect the session's own context: the last few conversational turns and the
  * project instruction files at the session's working directory.
  *
@@ -576,8 +615,7 @@ export async function collectSessionGrounding(
 		const row = event as { type?: unknown; message?: unknown; data?: unknown };
 		const type = str(row.type);
 		if (type !== "user/message" && type !== "assistant/message") continue;
-		const nested = row.data !== null && typeof row.data === "object" ? (row.data as { message?: unknown }).message : undefined;
-		const text = messageText(row.message ?? nested);
+		const text = messageText(eventMessage(type, row));
 		if (text === "") continue;
 		turns.push(`${type === "user/message" ? "用户" : "助手"}：${text}`);
 	}
@@ -612,16 +650,58 @@ export async function collectSessionGrounding(
 
 interface Route { provider: string; model: string; reasoningEffort?: string }
 
+/** One durable provider/model step; the shape both projection rows and the default selection use. */
+interface SelectionLike { provider?: unknown; model?: unknown; reasoningEffort?: unknown }
+
+/** Read one provider/model/effort selection, or undefined when it is not a complete route. */
+function toRoute(selection: SelectionLike | undefined, effort: string): Route | undefined {
+	if (selection === undefined || selection === null) return undefined;
+	if (typeof selection.provider !== "string" || typeof selection.model !== "string") return undefined;
+	return { provider: selection.provider, model: selection.model, reasoningEffort: effort };
+}
+
+/**
+ * Read the model the Session's own model selector currently shows.
+ *
+ * `modelSelection` is a registered session projection, and a projection is read
+ * against a LIVE `Session`, not an id: `sessions.get(id)` first, then
+ * `sessionProjections.snapshot(...)`. Its wire view is `{lastUsed, next}` where
+ * `next` is the pending pick or the last used route — exactly what the composer
+ * displays. Reading it this way is the only session-accurate route source;
+ * there is no `settings.get("agent-default-model")` key in this deployment, and
+ * the older code that assumed one is why the button answered `no-route`.
+ * @param ctx - plugin context.
+ * @param sessionId - candidate session id (may be stale or empty).
+ * @returns the selected route, when the session is live and shows one.
+ */
+function sessionSelectionRoute(ctx: PluginContext, sessionId: string, effort: string): Route | undefined {
+	if (sessionId === "") return undefined;
+	try {
+		const sessions = ctx.get("sessions") as SessionsService | undefined;
+		const session = sessions?.get?.(sessionId);
+		if (session === undefined) return undefined;
+		const projections = ctx.get("sessionProjections") as SessionProjectionsService | undefined;
+		const snapshot = projections?.snapshot?.(session, ["modelSelection"]);
+		const row = snapshot?.values?.modelSelection as { next?: SelectionLike; lastUsed?: SelectionLike } | undefined;
+		return toRoute(row?.next ?? row?.lastUsed, effort);
+	} catch (error) {
+		ctx.logger?.warn?.(`[dsh-composer-enhance] session model selection unavailable: ${String(error)}`);
+		return undefined;
+	}
+}
+
 /**
  * Resolve provider/model/effort for one request.
  *
- * Order: explicit plugin config → the session's durable `modelSelection`
- * projection (`next` while a selection is pending, else `lastUsed`) → the
- * `agent-default-model` setting. Effort is applied per stage, so the same model
- * serves the fast pass and the slow pass at different depths.
+ * Order: explicit plugin config → the live session's `modelSelection`
+ * projection (`next`, i.e. the model the composer shows, else `lastUsed`) →
+ * `ctx.agentDefaultModel.currentSelection()`, the deployment default owned by
+ * the `agent-default-model` plugin. Effort is applied per stage, so the same
+ * model serves the fast pass and the slow pass at different depths.
  * @param ctx - plugin context.
  * @param sessionId - session whose selection outranks the stored default.
  * @param effort - effort id for this stage.
+ * @param config - effective plugin config.
  * @returns the route, or undefined when nothing is configured.
  */
 export function resolveRoute(ctx: PluginContext, sessionId: unknown, effort: string, config?: PluginConfig): Route | undefined {
@@ -629,25 +709,20 @@ export function resolveRoute(ctx: PluginContext, sessionId: unknown, effort: str
 	if (config !== undefined && config.provider !== "" && config.model !== "") {
 		return { provider: config.provider, model: config.model, reasoningEffort: effort };
 	}
-	const id = typeof sessionId === "string" ? sessionId : "";
-	if (id !== "") {
-		const projections = ctx.get("sessionProjections") as {
-			get?: (session: string, key: string) => { next?: unknown; lastUsed?: unknown } | undefined;
-		} | undefined;
-		const selection = projections?.get?.(id, "modelSelection");
-		if (selection !== undefined && selection !== null) {
-			const chosen = (selection.next ?? selection.lastUsed) as { provider?: unknown; model?: unknown } | undefined;
-			if (typeof chosen?.provider === "string" && typeof chosen.model === "string") {
-				return { provider: chosen.provider, model: chosen.model, reasoningEffort: effort };
-			}
-		}
+
+	const fromSession = sessionSelectionRoute(ctx, typeof sessionId === "string" ? sessionId : "", effort);
+	if (fromSession !== undefined) return fromSession;
+
+	// Deployment default: `ctx.agentDefaultModel.currentSelection()` is the
+	// base plugin's own contract, and it is always present in the web profile.
+	try {
+		const defaults = ctx.get("agentDefaultModel") as AgentDefaultModelService | undefined;
+		const selection = typeof defaults?.currentSelection === "function" ? defaults.currentSelection() : undefined;
+		return toRoute(selection, effort);
+	} catch (error) {
+		ctx.logger?.warn?.(`[dsh-composer-enhance] default model selection unavailable: ${String(error)}`);
+		return undefined;
 	}
-	const stored = ctx.get("settings") as { get?: (key: string) => unknown } | undefined;
-	const fallback = stored?.get?.("agent-default-model") as { provider?: unknown; model?: unknown } | undefined;
-	if (fallback !== undefined && fallback !== null && typeof fallback.provider === "string" && typeof fallback.model === "string") {
-		return { provider: fallback.provider, model: fallback.model, reasoningEffort: effort };
-	}
-	return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -747,7 +822,11 @@ export function createHandler(ctx: PluginContext, state: ConfigState): RouteHand
 			const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
 			const route = resolveRoute(ctx, sessionId, stage === "slow" ? config.slowEffort : config.fastEffort, config);
 			if (route === undefined) {
-				sendJson(res, 200, { ok: false, reason: "no-route", message: "没有可用的模型路由。" });
+				sendJson(res, 200, {
+					ok: false,
+					reason: "no-route",
+					message: "没有可用的模型路由：插件未配置 provider/model，当前会话与部署默认模型也读不到选择。"
+				});
 				return;
 			}
 

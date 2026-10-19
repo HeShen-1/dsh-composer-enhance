@@ -41,7 +41,7 @@
     "test": "node test/grounding-smoke.mjs && node test/handler-smoke.mjs && node test/host-smoke.mjs && node test/parser-smoke.mjs"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-client-ui-primitives": "0.1.6-alpha.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.1-rc.2",
     "@types/node": "^22.10.0",
     "@types/react": "^18.3.12",
     "esbuild": "^0.25.0",

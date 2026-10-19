@@ -29,9 +29,17 @@ const ctxWith = (readSurface) => ({
 	logger
 });
 
-const userEvent = (text) => ({ type: "user/message", message: { content: [{ type: "text", text }] } });
-const assistantEvent = (text) => ({ type: "assistant/message", message: { content: [{ type: "text", text }] } });
-const toolEvent = (text) => ({ type: "tool/result", message: { content: [{ type: "text", text }] } });
+// Canonical session event shapes, exactly as `sessionQuery.readSurface` returns
+// them: a `user/message` event's `data` IS the UserMessage, while an
+// `assistant/message` event's `data` is `{turn, step, message, stream, …}` and
+// wraps the message one level down.
+const userEvent = (text) => ({ type: "user/message", seq: 1, data: { role: "user", content: [{ type: "text", text }] } });
+const assistantEvent = (text) => ({
+	type: "assistant/message",
+	seq: 2,
+	data: { turn: 1, step: 1, message: { role: "assistant", content: [{ type: "text", text }] }, stream: [] }
+});
+const toolEvent = (text) => ({ type: "tool/result", seq: 3, data: { role: "tool", content: [{ type: "text", text }] } });
 
 const workdir = "/tmp/dshce-grounding-fixture";
 rmSync(workdir, { recursive: true, force: true });
@@ -63,15 +71,24 @@ const windowed = await m.collectSessionGrounding(
 );
 ok("grounding: turn window keeps the newest", windowed.text.includes("三") && !windowed.text.includes("一"));
 
-const nested = await m.collectSessionGrounding(
-	ctxWith(async () => ({ session: { cwd: "" }, events: [{ type: "user/message", data: { message: { content: [{ type: "text", text: "嵌套形态" }] } } }] })),
+// The regression that mattered on the live page: user turns arrive as
+// `data` directly, and reading only `data.message` dropped every one of them.
+const canonicalUser = await m.collectSessionGrounding(
+	ctxWith(async () => ({ session: { cwd: "" }, events: [userEvent("用户真实形态")] })),
 	"s1",
 	8
 );
-ok("grounding: data.message shape also read", nested.text.includes("嵌套形态"));
+ok("grounding: canonical user event read from data", canonicalUser.text.includes("用户真实形态"));
+
+const legacy = await m.collectSessionGrounding(
+	ctxWith(async () => ({ session: { cwd: "" }, events: [{ type: "user/message", message: { content: [{ type: "text", text: "旧形态" }] } }] })),
+	"s1",
+	8
+);
+ok("grounding: legacy event.message shape still read", legacy.text.includes("旧形态"));
 
 const noText = await m.collectSessionGrounding(
-	ctxWith(async () => ({ session: { cwd: "" }, events: [{ type: "user/message", message: { content: [{ type: "image" }] } }] })),
+	ctxWith(async () => ({ session: { cwd: "" }, events: [{ type: "user/message", data: { role: "user", content: [{ type: "image" }] } }] })),
 	"s1",
 	8
 );

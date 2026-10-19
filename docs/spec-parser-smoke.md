@@ -34,7 +34,7 @@
 ## 验收
 
 1. `node test/parser-smoke.mjs` 单跑通过，输出 `<文件名>: N passed, 0 failed`，N ≥ 12。
-2. 四个离线测试文件按 `npm test` 顺序全绿（15 + 24 + 34 + 36 = 109 项）。
+2. 四个离线测试文件按 `npm test` 顺序全绿（16 + 27 + 46 + 36 = 125 项）。
 3. 反例有效：破坏 `parseJsonLoose` 里"字符串内的括号不参与配对"这条保护（把 `inString` 分支短路），
    `parser-smoke` 必须红。
    > 初版验收写的是"注释掉围栏处理必须红" —— **实测证伪**：`parseJsonLoose` 是从第一个 `{` 开始按

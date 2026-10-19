@@ -38,9 +38,10 @@ const REWRITE_TEXT = `${P.MARK_DRAFT}\n改写结果\n${P.MARK_ISSUES}\n- clarifi
  * Run one request through the real handler.
  * @param body - request body.
  * @param replies - model replies, consumed in call order.
+ * @param services - extra/overriding services for the fake context.
  * @returns the response body plus every system prompt the handler sent.
  */
-async function run(body, replies) {
+async function run(body, replies, services = {}) {
 	const sent = [];
 	let index = 0;
 	const llm = {
@@ -56,10 +57,13 @@ async function run(body, replies) {
 	const ctx = {
 		get: (key) => {
 			if (key === "llm") return llm;
-			// Route resolution falls back to the stored default model, which is what a
-			// real composition always has; without it every request short-circuits to
-			// `no-route` before any model call.
-			if (key === "settings") return { get: () => ({ provider: "test-provider", model: "test-model" }) };
+			// Route resolution ends at `ctx.agentDefaultModel.currentSelection()`,
+			// which a real composition always has; without it every request
+			// short-circuits to `no-route` before any model call. (The old code read
+			// a `settings.get("agent-default-model")` key that no deployment has —
+			// that mismatch was the live page's `no-route`.)
+			if (key in services) return services[key];
+			if (key === "agentDefaultModel") return { currentSelection: () => ({ provider: "test-provider", model: "test-model" }) };
 			return undefined;
 		},
 		logger: { warn: () => {}, info: () => {} }
@@ -139,9 +143,18 @@ const bad = await run({ draft: "   ", sessionId: "", stage: "fast" }, [REWRITE_T
 ok("blank draft rejected", bad.body.ok === false && bad.body.reason === "bad-request");
 ok("blank draft makes no model call", bad.calls === 0);
 
+// --- route resolution failure is a clean no-route reply --------------------
+// No session id, no projection, and no deployment default: the old code said
+// "no-route" here too, but on the real page it said it for every request. The
+// fake context can now drop the default model to pin the honest failure path.
+const unrouted = await run({ draft: "写个 API", sessionId: "", stage: "fast" }, [REWRITE_TEXT], { agentDefaultModel: undefined });
+ok("no route: reports no-route", unrouted.body.ok === false && unrouted.body.reason === "no-route");
+ok("no route: makes no model call", unrouted.calls === 0);
+ok("no route: message explains what is missing", typeof unrouted.body.message === "string" && unrouted.body.message.includes("provider/model"));
+
 // --- every successful reply carries the build marker -----------------------
-ok("build marker on gate reply", first.body.engine === "0.2.0-m2");
-ok("build marker on rewrite reply", chipsReply.body.engine === "0.2.0-m2");
+ok("build marker on gate reply", first.body.engine === "0.2.1-m1");
+ok("build marker on rewrite reply", chipsReply.body.engine === "0.2.1-m1");
 
 process.stdout.write(`handler-smoke: ${pass} passed, ${failures.length} failed\n`);
 for (const name of failures) process.stdout.write(`  FAIL ${name}\n`);

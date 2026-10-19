@@ -6,9 +6,10 @@
 
 ```bash
 cd /tmp   # 工作区在 fuse.portal 上时，Node 的 cwd 解析会失败
-node <repo>/test/host-smoke.mjs        # 34 项
-node <repo>/test/grounding-smoke.mjs   # 15 项
-node <repo>/test/handler-smoke.mjs     # 24 项
+node <repo>/test/host-smoke.mjs        # 46 项
+node <repo>/test/grounding-smoke.mjs   # 16 项
+node <repo>/test/handler-smoke.mjs     # 27 项
+node <repo>/test/parser-smoke.mjs      # 36 项
 ```
 
 ---
@@ -29,7 +30,7 @@ node <repo>/test/handler-smoke.mjs     # 24 项
 | 标准 | 证据 | 结果 |
 |---|---|---|
 | 控件取自 ui-primitives | `Button` / `Pill` / `Checkbox` / `Input` / `Tag` / `Tooltip`；样式只用 `--dsw-*` / `--dsh-composer-*` 令牌，无硬编码颜色、无别家 CSS-module 哈希类名 | ✅ |
-| 图标用官方字形 | ✨ = `IconSparkle16`（官方**确有**该字形；上一版手绘 SVG 是基于"官方没有"的错误前提）；spinner = `IconLoadingOutline16`；关闭 = `IconCloseOutline16`；警告 = `IconWarningOutline16` | ✅ |
+| 图标用官方字形 | ✨ = `IconSparkleRegular`（dsh 0.2.1 的 primitives 导出名；0.2.0 及以前是 `IconSparkle16`）；spinner = `IconLoadingOutlineRegular`；关闭 = `IconCloseOutlineRegular`；警告 = `IconWarningOutlineRegular`。devDependency 同步升到 `0.2.1-rc.2`，`tsc --noEmit` 绿 | ✅ |
 | 按钮落位 | `conversation.input.right` order 10。真机量测：按钮 `x 969–1005`，模型座位 `x 1017–1200`，**同一行 y 506–534，间距 12px**，DOM 顺序 `enhance-BEFORE-model` | ✅ |
 | 面板落位 | `conversation.input.dock` order 5，坐在自带 `todo`(0) 与 `goal`(10) 之间。真机量测：面板 `x 312–1238`，草稿顶边在其下方 | ✅ |
 | 三形态与草稿间距 | 结果条 / chips 行 / 面板距草稿顶边**恒为 16px**，不遮挡 | ✅ |
@@ -52,6 +53,8 @@ node <repo>/test/handler-smoke.mjs     # 24 项
 | 公开仓库 | https://github.com/HeShen-1/dsh-composer-enhance | ✅ |
 | 从 git 地址安装 | 先 `remove_bundle`，再 `install_bundle https://github.com/HeShen-1/dsh-composer-enhance` → `+ dsh-composer-enhance github:HeShen-1/dsh-composer-enhance`，5.6s，`applied` | ✅ |
 | git 安装的副本真的工作 | 装完后路由返回 `engine: 0.2.0-m2`；两个插槽占用者均 `active: true` | ✅ |
+| **模型路由（no-route 修复）** | 真机 0.2.1-rc.2：修前同一路由返回 `reason:"no-route"`；修后返回 `ok:true, engine:"0.2.1-m1", route:{provider:"deepseek-official", model:"deepseek-flash", reasoningEffort:"off"}`，闸门与改写两段都是真实模型调用。路由顺序 = config → 活 Session 的 `modelSelection` 投影 → `ctx.agentDefaultModel.currentSelection()`；`test/host-smoke.mjs` 覆盖每条分支（含投影抛错降级） | ✅ |
+| **会话接地补全** | 修前 `recentTurns` 只拿到 assistant 轮次（`user/message` 的 `data` 就是消息本体，旧代码只读 `data.message`）；修后真机 `contextUsed` 含 `recentTurns`，离线用例锁定 canonical user/assistant 事件形状 | ✅ |
 | 产物已提交，安装不需构建 | `package.json.files` 含 `lib/`；git 安装后 `node_modules/dsh-composer-enhance/lib/client.js` 首行即 loader envelope | ✅ |
 | 构建可复现 | 从 GitHub 全新 `git clone` → `pnpm install` → `pnpm run build`，产物与仓库里提交的 `lib/index.js`、`lib/client.js` **逐字节相同**；73 项测试在克隆产物上全过 | ✅ |
 
@@ -60,7 +63,7 @@ node <repo>/test/handler-smoke.mjs     # 24 项
 | 标准 | 证据 | 结果 |
 |---|---|---|
 | 分级澄清三形态 | 真机：`写个 API` → `shape:"chips"`（4 个具体选项，非夹具）；另一组 → `shape:"panel"`（3 题、每题带描述的选项、`取消/跳过/增强` 三出口）；明确草稿 → `shape:"none"` | ✅ |
-| 接地 | `contextUsed` 真机返回 `["systemPrompt","recentTurns"]`；`projectMemory` 离线测试覆盖（离线 15 项含 AGENTS.md/CLAUDE.md 回退与不可读降级） | ✅ |
+| 接地 | `contextUsed` 真机返回 `["systemPrompt","runtimeContext","recentTurns"]`；`projectMemory` 离线测试覆盖（离线 16 项含 AGENTS.md/CLAUDE.md 回退与不可读降级） | ✅ |
 | 快轨延迟 | `reasoningEffort: "off"`，实测 **1.9–2.3s**（旧版跟随会话模型 `max`，数秒起） | ✅ |
 | 改写质量下限 | 同一草稿调 prompt 前后对比：调前 issues 是同义反复（`明确"用 X 安装"指改为 X 安装方式`），调后是具体改动（`「README」明确为 README.md，「安装章节」指该文件里的「安装」小节`） | ✅ |
 | 改动清单 + 一键还原 | 真机：结果条列出 kind 标签的 issues 与「假设：…」，「还原原文」把草稿写回 | ✅ |

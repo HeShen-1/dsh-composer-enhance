@@ -98,6 +98,74 @@ const knownPrefix = m.parseRewrite(`${P.MARK_DRAFT}\nA\n${P.MARK_ISSUES}\n- note
 ok("rewrite: unlisted but well-formed kind keeps only the body", knownPrefix.issues[0].kind === "clarified" && knownPrefix.issues[0].text === "dropped prefix");
 ok("rewrite: bullet variants accepted", m.parseRewrite(`${P.MARK_DRAFT}\nA\n${P.MARK_ISSUES}\n• added: x\n* clarified: y\n`)?.issues.length === 2);
 
+// --- resolveRoute: which service actually carries the model selection ------
+// The live host (dsh 0.2.1-rc.2) has no `settings.get("agent-default-model")`
+// key. A session selection lives in the `modelSelection` projection, read
+// against a LIVE Session; the deployment default is
+// `ctx.agentDefaultModel.currentSelection()`. Every branch here mirrors one of
+// those contracts, because getting them wrong is exactly what produced
+// `no-route` on the real page.
+const routeCtx = (services) => ({ get: (key) => services[key], logger: { warn: () => {}, info: () => {} } });
+const sessionHandle = { id: "s1" };
+
+const explicit = m.resolveRoute(routeCtx({}), "s1", "max", { ...m.CONFIG_DEFAULTS, provider: "cp", model: "cm" });
+ok("route: explicit config wins", explicit?.provider === "cp" && explicit?.model === "cm" && explicit?.reasoningEffort === "max");
+
+const sessionWins = m.resolveRoute(routeCtx({
+	sessions: { get: (id) => id === "s1" ? sessionHandle : undefined },
+	sessionProjections: { snapshot: () => ({ values: { modelSelection: { lastUsed: { provider: "lp", model: "lm" }, next: { provider: "np", model: "nm" } } } }) },
+	agentDefaultModel: { currentSelection: () => ({ provider: "dp", model: "dm" }) }
+}), "s1", "off");
+ok("route: session projection 'next' outranks the deployment default", sessionWins?.provider === "np" && sessionWins?.model === "nm");
+ok("route: per-stage effort is applied to the session route", sessionWins?.reasoningEffort === "off");
+
+const lastUsedWins = m.resolveRoute(routeCtx({
+	sessions: { get: () => sessionHandle },
+	sessionProjections: { snapshot: () => ({ values: { modelSelection: { lastUsed: { provider: "lp", model: "lm" }, next: null } } }) },
+	agentDefaultModel: { currentSelection: () => ({ provider: "dp", model: "dm" }) }
+}), "s1", "max");
+ok("route: 'lastUsed' is the fallback when no pick is pending", lastUsedWins?.provider === "lp" && lastUsedWins?.model === "lm");
+
+const notLive = m.resolveRoute(routeCtx({
+	sessions: { get: () => undefined },
+	sessionProjections: { snapshot: () => ({ values: { modelSelection: { next: { provider: "np", model: "nm" } } } }) },
+	agentDefaultModel: { currentSelection: () => ({ provider: "dp", model: "dm" }) }
+}), "s1", "off");
+ok("route: a non-live session falls back to the deployment default", notLive?.provider === "dp" && notLive?.model === "dm");
+
+const noProjection = m.resolveRoute(routeCtx({
+	sessions: { get: () => sessionHandle },
+	sessionProjections: { snapshot: () => ({ values: {} }) },
+	agentDefaultModel: { currentSelection: () => ({ provider: "dp", model: "dm" }) }
+}), "s1", "off");
+ok("route: an empty projection snapshot falls back to the deployment default", noProjection?.provider === "dp");
+
+const agentDefault = m.resolveRoute(routeCtx({
+	agentDefaultModel: { currentSelection: () => ({ provider: "dp", model: "dm", reasoningEffort: "high" }) }
+}), "", "off");
+ok("route: agentDefaultModel carries the deployment default", agentDefault?.provider === "dp" && agentDefault?.model === "dm");
+ok("route: the plugin's stage effort replaces the selection's effort", agentDefault?.reasoningEffort === "off");
+
+const brokenProjection = m.resolveRoute(routeCtx({
+	sessions: { get: () => sessionHandle },
+	sessionProjections: { snapshot: () => { throw new Error("projection boom"); } },
+	agentDefaultModel: { currentSelection: () => ({ provider: "dp", model: "dm" }) }
+}), "s1", "off");
+ok("route: a throwing projection degrades to the deployment default", brokenProjection?.provider === "dp");
+
+const brokenDefault = m.resolveRoute(routeCtx({
+	agentDefaultModel: { currentSelection: () => { throw new Error("default boom"); } }
+}), "", "off");
+ok("route: a throwing default selection yields no route instead of throwing", brokenDefault === undefined);
+
+const bare = m.resolveRoute(routeCtx({}), "s1", "off");
+ok("route: nothing configured yields undefined", bare === undefined);
+
+const partialConfig = m.resolveRoute(routeCtx({
+	agentDefaultModel: { currentSelection: () => ({ provider: "dp", model: "dm" }) }
+}), "", "off", { ...m.CONFIG_DEFAULTS, provider: "only-provider" });
+ok("route: a half-configured pair is ignored, not used as a route", partialConfig?.provider === "dp");
+
 // --- export surface --------------------------------------------------------
 ok("exports: name", m.name === "composer-enhance");
 ok("exports: injects llm", Array.isArray(m.inject) && m.inject.includes("llm"));
