@@ -6,10 +6,12 @@
 
 ```bash
 cd /tmp   # 工作区在 fuse.portal 上时，Node 的 cwd 解析会失败
-node <repo>/test/host-smoke.mjs        # 59 项
-node <repo>/test/grounding-smoke.mjs   # 16 项
-node <repo>/test/handler-smoke.mjs     # 36 项
-node <repo>/test/parser-smoke.mjs      # 36 项
+node <repo>/test/host-smoke.mjs         # 59 项
+node <repo>/test/grounding-smoke.mjs    # 16 项
+node <repo>/test/environment-smoke.mjs  # 24 项
+node <repo>/test/handler-smoke.mjs      # 43 项
+node <repo>/test/parser-smoke.mjs       # 36 项
+node <repo>/test/suggestion-smoke.mjs   # 29 项（加载 lib/client.js，假时钟 + 假 fetch）
 ```
 
 ---
@@ -52,9 +54,11 @@ node <repo>/test/parser-smoke.mjs      # 36 项
 |---|---|---|
 | 公开仓库 | https://github.com/HeShen-1/dsh-composer-enhance | ✅ |
 | 从 git 地址安装 | 先 `remove_bundle`，再 `install_bundle https://github.com/HeShen-1/dsh-composer-enhance` → `+ dsh-composer-enhance github:HeShen-1/dsh-composer-enhance`，5.6s，`applied` | ✅ |
-| git 安装的副本真的工作 | 装完后路由返回 `engine: 0.2.2-m1`；两个插槽占用者均 `active: true` | ✅ |
+| git 安装的副本真的工作 | 装完后路由返回 `engine: 0.3.0`；两个插槽占用者均 `active: true` | ✅ |
 | **模型路由（no-route 修复）** | 真机 0.2.1-rc.2：修前同一路由返回 `reason:"no-route"`；修后返回 `ok:true, engine:"0.2.1-m1", route:{provider:"deepseek-official", model:"deepseek-flash", reasoningEffort:"off"}`，闸门与改写两段都是真实模型调用。路由顺序 = config → 活 Session 的 `modelSelection` 投影 → `ctx.agentDefaultModel.currentSelection()`；`test/host-smoke.mjs` 覆盖每条分支（含投影抛错降级） | ✅ |
 | **下一步建议（P0）** | host 真机 0.2.1-rc.2：空草稿 `{"stage":"suggest","draft":""}` 返回 `ok:true, engine:"0.2.2-m1", suggestion:"先按 P0 走：在输入框上方加一行建议条，点击后填入草稿但不发送。"`（内容来自最近对话）；非空 draft 返回 400；`normalizeSuggestion` 11 项离线用例（标签/引号/围栏/折行/截断/空值）。客户端：建议条出现、Tab 把文本填进草稿、未自动发送——用户页面实测确认 | ✅ |
+| **下一步建议不再"有时不出现"（0.3.0）** | 三个根因各自有离线用例钉住：① 被 10s 最小间隔挡住的回合现在排到到期再请求（`suggestion-smoke.mjs` 断言第二次 turn-end 在时钟到期后触发）；② 去掉 60s TTL（advance 10 分钟后仍是 `shown`）；③ 传输/HTTP/空结果重试一次（第一次失败后 10s 重试，第二次失败不再重试）。另覆盖：显式关闭不被自动追、草稿编辑作废、blank 会话不请求、HMR 重建后聚焦重新武装、隐藏标签页恢复后重新武装。**真机复测待 `dsh web` 重启后由用户页面确认** | ⏳ 离线 ✅ / 真机待测 |
+| **环境感知接地（0.3.0）** | 真机复现旧行为并留档：草稿 `使用dsh-mnemon插件工具记录项目情况，然后把 /karpathy-guidelines 保存到AGENTS.md；` → 旧 host `gate.reason` 写成「“/karpathy-guidelines”不是明确内容，需要确认是要把该路径/文件的内容…」，把已安装技能当路径反问。修后 `environment-smoke.mjs` 24 项（技能/命令/插件清单、cwd 透传、去重、限额截断、服务缺失/抛错降级）+ `handler-smoke.mjs` 新增 7 项（gate 与 rewrite 请求体都含清单、`contextUsed` 含 `environment`、suggest 阶段不注入） | ⏳ 离线 ✅ / 真机待 `dsh web` 重启 |
 | **内联 ghost（P1）** | 真机（用户确认）：建议直接以灰字显示在输入框内、无灰底；聚焦后 `Tab`/`×` 淡入，`Tab` 填入草稿且不发送；Console 无报错。期间修掉三个真机问题：client HMR 不刷新旧样式表、聚焦时上方条与 ghost 双表面、用主题 token 铺底导致深色主题出现灰带（改为隐藏 `[data-composer-placeholder]`、ghost 完全透明、颜色只走 `--dsw-alias-label-caption`）。浅色主题未单独截图，但无写死色值、全部走主题 token | ✅ |
 | **会话接地补全** | 修前 `recentTurns` 只拿到 assistant 轮次（`user/message` 的 `data` 就是消息本体，旧代码只读 `data.message`）；修后真机 `contextUsed` 含 `recentTurns`，离线用例锁定 canonical user/assistant 事件形状 | ✅ |
 | 产物已提交，安装不需构建 | `package.json.files` 含 `lib/`；git 安装后 `node_modules/dsh-composer-enhance/lib/client.js` 首行即 loader envelope | ✅ |
@@ -65,7 +69,7 @@ node <repo>/test/parser-smoke.mjs      # 36 项
 | 标准 | 证据 | 结果 |
 |---|---|---|
 | 分级澄清三形态 | 真机：`写个 API` → `shape:"chips"`（4 个具体选项，非夹具）；另一组 → `shape:"panel"`（3 题、每题带描述的选项、`取消/跳过/增强` 三出口）；明确草稿 → `shape:"none"` | ✅ |
-| 接地 | `contextUsed` 真机返回 `["systemPrompt","runtimeContext","recentTurns"]`；`projectMemory` 离线测试覆盖（离线 16 项含 AGENTS.md/CLAUDE.md 回退与不可读降级） | ✅ |
+| 接地 | `contextUsed` 真机返回 `["systemPrompt","runtimeContext","recentTurns"]`（0.2.x）；0.3.0 起 fast 阶段再加 `"environment"`；`projectMemory` 离线测试覆盖（离线 16 项含 AGENTS.md/CLAUDE.md 回退与不可读降级） | ✅ |
 | 快轨延迟 | `reasoningEffort: "off"`，实测 **1.9–2.3s**（旧版跟随会话模型 `max`，数秒起） | ✅ |
 | 改写质量下限 | 同一草稿调 prompt 前后对比：调前 issues 是同义反复（`明确"用 X 安装"指改为 X 安装方式`），调后是具体改动（`「README」明确为 README.md，「安装章节」指该文件里的「安装」小节`） | ✅ |
 | 改动清单 + 一键还原 | 真机：结果条列出 kind 标签的 issues 与「假设：…」，「还原原文」把草稿写回 | ✅ |

@@ -125,5 +125,12 @@ export function apply(ctx: ClientContext): void {
 
 export const name = "composer-enhance";
 
+/**
+ * The store factory is exported for the offline lifecycle test: it is the one
+ * piece of client behaviour that must be provable without a browser (the
+ * suggestion scheduler). The slot surfaces above never import it from here.
+ */
+export { createFlowStore } from "./store";
+
 /** The slot registry is the only client service this half needs. */
 export const inject = ["slots"];

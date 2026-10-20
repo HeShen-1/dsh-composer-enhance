@@ -133,9 +133,6 @@ export type FailureCode =
 /** Hard cap on one suggestion row (mirrors the host's `MAX_SUGGESTION_CHARS`). */
 export const MAX_SUGGESTION_CHARS = 160;
 
-/** How long one shown suggestion stays before it expires. */
-export const SUGGESTION_TTL_MS = 60_000;
-
 /**
  * Normalize one suggestion response.
  *

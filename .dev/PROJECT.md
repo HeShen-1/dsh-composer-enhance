@@ -7,7 +7,7 @@ DeepSeek Harness Web 的**输入框提示词增强**插件：输入框旁的 ✨
 （Cordis 插件，注册宿主 HTTP 路由），客户端半 `lib/client.js`（`dsh.client.platform = "web"`）。
 无打包器，`scripts/build.mjs` 直接产出。
 
-测试命令: node test/grounding-smoke.mjs && node test/handler-smoke.mjs && node test/host-smoke.mjs && node test/parser-smoke.mjs
+测试命令: node test/grounding-smoke.mjs && node test/environment-smoke.mjs && node test/handler-smoke.mjs && node test/host-smoke.mjs && node test/parser-smoke.mjs && node test/suggestion-smoke.mjs
 
 **目录约定**
 - `src/`：TypeScript 源码

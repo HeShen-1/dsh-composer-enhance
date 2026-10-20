@@ -51,7 +51,7 @@ const DEFAULT_TIMEOUT_MS = 60_000;
  * to do nothing, this says whether the host answering the page is the build you
  * think it is.
  */
-const ENGINE = "0.2.2-m1";
+const ENGINE = "0.3.0";
 
 /** Caps mirrored by docs/protocol.md; the client enforces the same numbers. */
 const MAX_QUESTIONS = 3;
@@ -71,6 +71,26 @@ const INSTRUCTION_SECTIONS: readonly string[] = ["instructions", "agent-instruct
 
 /** Per-section cap on grounding text, so one long instruction file cannot dominate the call. */
 const GROUNDING_SECTION_CHARS = 6000;
+
+/**
+ * Caps on the installed-environment inventory injected into the gate and the
+ * rewriter.
+ *
+ * The gate cannot tell a skill name from a file path without this list: the
+ * live report was a draft `把 /karpathy-guidelines 保存到 AGENTS.md` producing
+ * the question "「/karpathy-guidelines」不是明确内容……" — the model read an
+ * installed skill name as a path. The inventory is a fact list, not prose, so
+ * it is bounded per category: a large install must not flood the prompt.
+ */
+const ENV_SKILLS_CHARS = 2400;
+const ENV_COMMANDS_CHARS = 700;
+const ENV_PLUGINS_CHARS = 900;
+/** Per-entry description caps inside the inventory. */
+const ENV_SKILL_DESC_CHARS = 60;
+const ENV_COMMAND_DESC_CHARS = 40;
+
+/** Header of the environment block, kept short because it is sent on every request. */
+const ENV_HEADER = "【当前 DSH 环境（已安装的真实实体，不是文件路径）】";
 
 /** Delimiters of the rewrite reply. Plain markers beat JSON here: a rewritten prompt is long, and a model that emits a raw newline inside a JSON string breaks the whole parse. */
 const MARK_DRAFT = "===DRAFT===";
@@ -115,6 +135,35 @@ interface SessionsService {
 /** `ctx.sessionProjections` read face — the wire snapshot of registered units. */
 interface SessionProjectionsService {
 	snapshot?(session: SessionHandle, keys: readonly string[]): { values?: Record<string, unknown> } | undefined;
+}
+
+/** One skill catalog row (`ctx.skills.list()`), as far as grounding reads it. */
+interface SkillSummaryLike { name?: unknown; description?: unknown }
+
+/** `ctx.skills` — the skill registry; only the catalog read is needed. */
+interface SkillsService {
+	list?(options?: { cwd?: string }): Promise<SkillSummaryLike[]>;
+}
+
+/** `ctx.agents` — live agents, keyed by session identity. */
+interface AgentsService {
+	get?(id: string): object | undefined;
+}
+
+/** One command catalog row (`ctx.commands.list()`). */
+interface CommandLike { name?: unknown; description?: unknown }
+
+/** `ctx.commands` — the slash-command registry, read for one agent. */
+interface CommandsService {
+	list?(agent: object): readonly CommandLike[];
+}
+
+/** One plugin inventory row (`ctx.pluginManager.listPlugins()`). */
+interface PluginInfoLike { moduleName?: unknown; enabled?: unknown }
+
+/** `ctx.pluginManager` — the profile's installed-plugin inventory. */
+interface PluginManagerService {
+	listPlugins?(): Promise<PluginInfoLike[]>;
 }
 
 interface WebServerService {
@@ -262,6 +311,8 @@ const GATE_SYSTEM = [
 	"4. 拿不准就选 none。**宁可少问，不要凑数**——每弹一次问题都在消耗用户的耐心。",
 	"5. 每个选项最多一个标 \"recommended\": true；没把握就都不标。",
 	"6. 用户用中文写草稿就输出中文。",
+	"7. 请求里可能附有【当前 DSH 环境】清单，列出已安装的技能、斜杠命令与插件。清单里的名字都是真实存在的实体：草稿提到它们时按对应实体理解，**禁止**追问「这是什么/具体指什么」。",
+	"8. 这类引用本身不构成歧义；只有同一个名字确实可能指两个不同事物、或要对它做什么不明确时，才算缺口。",
 	"",
 	"只输出 JSON，不要解释、不要代码围栏：",
 	'{"hasAmbiguity":false,"ambiguityType":"none","reason":"","shape":"none","chips":[],"questions":[]}',
@@ -696,6 +747,159 @@ export async function collectSessionGrounding(
 }
 
 // ---------------------------------------------------------------------------
+// Installed-environment grounding
+// ---------------------------------------------------------------------------
+
+/** One named entity in the installed environment. */
+export interface EnvironmentEntry {
+	name: string;
+	description: string;
+}
+
+/** What {@link buildEnvironmentGrounding} renders. */
+export interface EnvironmentInventory {
+	skills: EnvironmentEntry[];
+	commands: EnvironmentEntry[];
+	plugins: string[];
+}
+
+/** Clip one description to its per-entry cap, collapsing newlines. */
+function clipDescription(text: string, cap: number): string {
+	const flat = text.replace(/\s+/gu, " ").trim();
+	return flat.length <= cap ? flat : `${flat.slice(0, Math.max(0, cap - 1))}…`;
+}
+
+/** Render one `、`-joined list, clipped with an ellipsis at its category budget. */
+function renderList(parts: readonly string[], cap: number): string {
+	const out: string[] = [];
+	let used = 0;
+	for (const part of parts) {
+		const addition = out.length === 0 ? part.length : part.length + 1;
+		if (used + addition > cap) {
+			// The list still has to show that it was cut, or the model sees a
+			// complete-looking catalog that silently lacks the name in the draft.
+			if (out.length === 0) out.push(`${part.slice(0, Math.max(0, cap - 1))}…`);
+			else out.push("…");
+			break;
+		}
+		out.push(part);
+		used += addition;
+	}
+	return out.join("、");
+}
+
+/** Render entries as one `名字（描述）` list, clipped to a category budget. */
+function renderEntries(entries: readonly EnvironmentEntry[], descCap: number, cap: number): string {
+	return renderList(entries.map((entry) => {
+		const description = clipDescription(entry.description, descCap);
+		return description === "" ? entry.name : `${entry.name}（${description}）`;
+	}), cap);
+}
+
+/** Render one `- 标签：a、b、…` line, or "" when the list is empty. */
+function renderEnvironmentLine(label: string, body: string): string {
+	return body === "" ? "" : `- ${label}：${body}`;
+}
+
+/**
+ * Render the installed-environment inventory injected into the gate and the
+ * rewriter.
+ *
+ * Ordering is fixed — skills, slash commands, plugins — and each category has
+ * its own character budget, so one huge catalog cannot crowd the rest out.
+ * @param inventory - the catalogs collected from the live services.
+ * @returns the full block, or "" when every catalog was empty.
+ */
+export function buildEnvironmentGrounding(inventory: EnvironmentInventory): string {
+	const lines = [
+		renderEnvironmentLine("技能", renderEntries(inventory.skills, ENV_SKILL_DESC_CHARS, ENV_SKILLS_CHARS)),
+		renderEnvironmentLine("斜杠命令", renderEntries(inventory.commands, ENV_COMMAND_DESC_CHARS, ENV_COMMANDS_CHARS)),
+		renderEnvironmentLine("插件", renderList(inventory.plugins, ENV_PLUGINS_CHARS))
+	].filter((line) => line !== "");
+	return lines.length === 0 ? "" : `${ENV_HEADER}\n${lines.join("\n")}`;
+}
+
+/** Push one named entry, skipping blanks and duplicates. */
+function pushEntry(target: EnvironmentEntry[], seen: Set<string>, name: string, description: string): void {
+	if (name === "" || seen.has(name)) return;
+	seen.add(name);
+	target.push({ name, description });
+}
+
+/**
+ * Read the working directory of a live session.
+ * @param ctx - plugin context.
+ * @param sessionId - the session to read.
+ * @returns its cwd, or "" when the session is not live.
+ */
+function sessionWorkingDirectory(ctx: PluginContext, sessionId: string): string {
+	if (sessionId === "") return "";
+	try {
+		const sessions = ctx.get("sessions") as SessionsService | undefined;
+		const session = sessions?.get?.(sessionId) as { header?: { cwd?: unknown } } | undefined;
+		const cwd = session?.header?.cwd;
+		return typeof cwd === "string" ? cwd : "";
+	} catch {
+		return "";
+	}
+}
+
+/**
+ * Collect the installed skills, slash commands, and plugins a draft may name.
+ *
+ * Three live services, each read defensively: a deployment without one of them
+ * must degrade to an empty section, not fail the enhancement. The gate and the
+ * rewriter both receive this block, so "把 /karpathy-guidelines 写进 AGENTS.md"
+ * is understood as a skill reference instead of a file path.
+ * @param ctx - plugin context.
+ * @param sessionId - session whose workspace and agent scope the catalogs use.
+ * @returns the rendered block plus the grounding source names that contributed.
+ */
+export async function collectEnvironmentGrounding(ctx: PluginContext, sessionId: string): Promise<{ text: string; used: string[] }> {
+	const inventory: EnvironmentInventory = { skills: [], commands: [], plugins: [] };
+	const skills = ctx.get("skills") as SkillsService | undefined;
+	const seenSkills = new Set<string>();
+	try {
+		const cwd = sessionWorkingDirectory(ctx, sessionId);
+		const rows = typeof skills?.list === "function" ? await skills.list(cwd === "" ? {} : { cwd }) : [];
+		for (const row of Array.isArray(rows) ? rows : []) {
+			pushEntry(inventory.skills, seenSkills, str(row.name), str(row.description));
+		}
+	} catch (error) {
+		ctx.logger?.warn?.(`[dsh-composer-enhance] skill catalog unavailable: ${String(error)}`);
+	}
+	const commands = ctx.get("commands") as CommandsService | undefined;
+	const agents = ctx.get("agents") as AgentsService | undefined;
+	const seenCommands = new Set<string>();
+	try {
+		const agent = sessionId === "" ? undefined : agents?.get?.(sessionId);
+		const rows = typeof commands?.list === "function" && agent !== undefined ? commands.list(agent) : [];
+		for (const row of Array.isArray(rows) ? rows : []) {
+			pushEntry(inventory.commands, seenCommands, str(row.name), str(row.description));
+		}
+	} catch (error) {
+		ctx.logger?.warn?.(`[dsh-composer-enhance] command catalog unavailable: ${String(error)}`);
+	}
+	const plugins = ctx.get("pluginManager") as PluginManagerService | undefined;
+	const seenPlugins = new Set<string>();
+	try {
+		const rows = typeof plugins?.listPlugins === "function" ? await plugins.listPlugins() : [];
+		for (const row of Array.isArray(rows) ? rows : []) {
+			if (row?.enabled === false) continue;
+			const name = str(row?.moduleName);
+			if (name === "" || seenPlugins.has(name)) continue;
+			seenPlugins.add(name);
+			inventory.plugins.push(name);
+		}
+		inventory.plugins.sort((left, right) => left.localeCompare(right));
+	} catch (error) {
+		ctx.logger?.warn?.(`[dsh-composer-enhance] plugin inventory unavailable: ${String(error)}`);
+	}
+	const text = buildEnvironmentGrounding(inventory);
+	return { text, used: text === "" ? [] : ["environment"] };
+}
+
+// ---------------------------------------------------------------------------
 // Route resolution
 // ---------------------------------------------------------------------------
 
@@ -899,6 +1103,21 @@ export function createHandler(ctx: PluginContext, state: ConfigState): RouteHand
 			const contextUsed = [...grounding.used, ...sessionGrounding.used];
 			const preamble = groundingText === "" ? "" : `${GROUNDING_NOTE}\n\n${groundingText}\n\n---\n\n`;
 
+			// The gate and the rewriter must know what an installed skill, slash
+			// command, or plugin name in the draft refers to. Without this block the
+			// live gate read "把 /karpathy-guidelines 保存到 AGENTS.md" as a file path
+			// and asked what "/karpathy-guidelines" was — a question the environment
+			// could answer itself. Only the fast stage pays for it: the suggestion
+			// stage has no draft to disambiguate.
+			let environmentPrefix = "";
+			if (stage === "fast") {
+				const environment = await collectEnvironmentGrounding(ctx, sessionId);
+				if (environment.text !== "") {
+					environmentPrefix = `${environment.text}\n\n`;
+					contextUsed.push(...environment.used);
+				}
+			}
+
 			// --- suggest stage: the user's likely next message --------------------
 			if (stage === "suggest") {
 				const output = await runModel(
@@ -963,7 +1182,7 @@ export function createHandler(ctx: PluginContext, state: ConfigState): RouteHand
 			let gate = normalizeGate(undefined);
 
 			if (!answering) {
-				const output = await runModel(ctx, route, config.gatePrompt || GATE_SYSTEM, `${preamble}【用户草稿】\n${draft}`, sessionId, config.timeoutMs, config.maxTokens);
+				const output = await runModel(ctx, route, config.gatePrompt || GATE_SYSTEM, `${preamble}${environmentPrefix}【用户草稿】\n${draft}`, sessionId, config.timeoutMs, config.maxTokens);
 				gate = normalizeGate(parseJsonLoose(output));
 			}
 
@@ -992,7 +1211,7 @@ export function createHandler(ctx: PluginContext, state: ConfigState): RouteHand
 				ctx,
 				route,
 				config.rewritePrompt || REWRITE_SYSTEM,
-				`${preamble}【用户草稿】\n${draft}${answersBlock}${chipBlock}`,
+				`${preamble}${environmentPrefix}【用户草稿】\n${draft}${answersBlock}${chipBlock}`,
 				sessionId,
 				config.timeoutMs,
 				config.maxTokens

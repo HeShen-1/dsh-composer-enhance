@@ -1,7 +1,7 @@
 {
   "name": "dsh-composer-enhance",
-  "version": "0.2.0",
-  "description": "Native DeepSeek Harness web plugin: a \u2728 button in the composer that grounds a draft in session context, asks only about genuine ambiguity, rewrites the draft in place with a change list, then refines it on a slower second pass.",
+  "version": "0.3.0",
+  "description": "Native DeepSeek Harness web plugin: a ✨ button in the composer that grounds a draft in session context, asks only about genuine ambiguity, rewrites the draft in place with a change list, then refines it on a slower second pass.",
   "keywords": [
     "deepseek-harness",
     "dsh",
@@ -39,7 +39,7 @@
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "check": "node --check lib/index.js && node --check lib/client.js",
-    "test": "node test/grounding-smoke.mjs && node test/handler-smoke.mjs && node test/host-smoke.mjs && node test/parser-smoke.mjs"
+    "test": "node test/grounding-smoke.mjs && node test/environment-smoke.mjs && node test/handler-smoke.mjs && node test/host-smoke.mjs && node test/parser-smoke.mjs && node test/suggestion-smoke.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-client-ui-primitives": "0.2.1-rc.2",

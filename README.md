@@ -4,6 +4,8 @@ DeepSeek Harness Web 的**输入框提示词增强**插件。
 
 在输入框工具行、模型座位左边有一个 ✨ 按钮。点它：读会话上下文 → 判断草稿里有没有**会实质改变产出**的信息缺口 → 有就问你（一行 chips 或一张问答面板），没有就直接改写 → 把改写结果原地写回草稿，并列出**改了什么**，配一键还原。
 
+它会先读当前 DSH 环境里**已安装的技能、斜杠命令与插件名**：草稿里出现这些名字时按已知实体理解，不会被当成「这是什么」反问（例：`把 /karpathy-guidelines 保存到 AGENTS.md` 不再问 `/karpathy-guidelines` 是什么）。
+
 它是**原生 DSH 插件**：TypeScript 源码 + 构建产物、`dsh.client` 声明、`cordis.patch.yml` bundle 层、用 `plugin_manager` 安装与启停。不手改 profile、不建 symlink。
 
 ---
@@ -29,6 +31,7 @@ DeepSeek Harness Web 的**输入框提示词增强**插件。
 - **采用**：点「采用」或按 **Tab**（仅 composer 聚焦、无弹层、非 IME 时拦截；不确定就放行）。
   只把文本写进草稿（一次撤销步），**不自动发送**；光标留在文本末尾，按 Enter 由你决定。
 - **拒绝**：点 × 或 Esc；开始打字、发送、切会话、隐藏页面都会立即作废。
+- 失败会**自动重试一次**；建议显示后**不会 60s 自动消失**，留到你输入/发送/采纳/关闭。
 - 静默失败，不打扰。
 
 ### 内联灰色 ghost（P1）
@@ -76,6 +79,7 @@ plugin_manager  remove_bundle  dsh-composer-enhance
 点 ✨
   │
   ├─ 接地：读会话人设 + 项目约定（AGENTS.md）+ 最近对话 + 运行策略
+  │        + 已安装技能/斜杠命令/插件清单（只给闸门与改写，防把已知实体当歧义）
   │
   ├─ 闸门（快轨，reasoningEffort: off，实测 ~2s）
   │     判定歧义类型 → 决定 shape
@@ -93,6 +97,7 @@ plugin_manager  remove_bundle  dsh-composer-enhance
 | 规则 | 为什么 |
 |---|---|
 | **默认不问**。能从句内、上下文、项目约定推出来的缺口不算缺口 | 每弹一次问题都在收体验税。published 的先例（Augment、Bedrock、Vertex）全是一键直接改写，没有一家用多题问答 |
+| **已安装的技能/命令/插件名不是歧义** | 模型不知道环境里装了什么，就会把 `grilling`、`/karpathy-guidelines` 当成普通词或文件路径反问"具体是什么"；清单注入后这类问题不再出现 |
 | **先判歧义类型再提问**（semantic / specify / generalize） | AT-CoT（arXiv 2504.12113）的结论：只给分类定义、不要求先推理，效果**比不作任何处理更差** |
 | **改写必须比原文更可执行**，否则原样返回并把 ISSUES 留空 | 直接针对"只删了个『的』"这类无效改写 |
 | **禁止同义反复的 issues** | `明确"用 X 安装"指改为 X 安装方式` 等于没说，是噪声不是信息 |
@@ -192,7 +197,7 @@ node test/parser-smoke.mjs     # 36 项：解析层 —— JSON 抠取（围栏/
 | `src/index.ts`（host） | **需要重启 `dsh web`**。实测探针：改完 30 秒仍未变（HMR 的 `ignored` 默认排除 `**/node_modules`，而插件是 profile 的 `link:` 依赖） |
 | 插件 `config:` 块 | patch 变更触发 recomposition，即时生效 |
 
-host 半部每次请求都会回一个 `engine` 字段（当前 `0.2.2-m1`）——行为看着没变时，先看它确认真机跑的是哪一版。
+host 半部每次请求都会回一个 `engine` 字段（当前 `0.3.0`）——行为看着没变时，先看它确认真机跑的是哪一版。
 
 ---
 
@@ -207,6 +212,16 @@ host 半部每次请求都会回一个 `engine` 字段（当前 `0.2.2-m1`）—
 
 ## 更新记录
 
+- **0.3.0**（2026-10-20）
+  - **环境感知接地**：`stage:fast` 时从 `ctx.skills` / `ctx.commands` / `ctx.pluginManager` 读已安装的技能、
+    斜杠命令、插件清单（分类限额 2400/700/900 字），只注入闸门与改写；闸门新增硬规则：清单里的名字
+    按已知实体理解，禁止追问"是什么"。修掉真机反馈：`把 /karpathy-guidelines 保存到 AGENTS.md`
+    被反问 `/karpathy-guidelines` 是什么。
+  - **下一步建议不再"有时不出现"**：被 10s 最小间隔挡住的尝试改为排到到期再请求（原来直接丢弃、
+    永不重试）；失败/空结果重试一次；去掉 60s TTL（建议一直留到用户操作）；聚焦空输入框、切回可见
+    标签页都会重新武装调度。新增 `test/suggestion-smoke.mjs` 29 项、`test/environment-smoke.mjs` 24 项。
+  - 移除建议的 60s TTL 常量（`SUGGESTION_TTL_MS`），协议文档同步（环境清单、重试/无 TTL 语义）。
+  - **207 项离线冒烟测试**、`tsc --noEmit` 全绿。
 - **0.2.0**（2026-10-20）
   - 新增**下一步建议**：host `stage:"suggest"`（空草稿、一条消息、160 字上限）+ 输入框内灰色 ghost；
     `Tab`/点击采纳只写草稿、**不自动发送**；拒绝/打字/发送/切会话即作废，含防抖、单飞、冷却与 TTL。

@@ -21,7 +21,6 @@ import {
 	MAX_GATE_ROUNDS,
 	ROUTE,
 	SLOW_WINDOW_MS,
-	SUGGESTION_TTL_MS,
 	chipQuestionEcho,
 	normalizeAssumptions,
 	normalizeChips,
@@ -233,24 +232,22 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 	/** The slow review's own handle: it must never cancel the fast request. */
 	let slowInFlight: AbortController | null = null;
 	let noticeTimer: ReturnType<typeof setTimeout> | null = null;
-	/** Next-message suggestion: debounce, in-flight, and suppression clocks. */
+	/** Next-message suggestion: debounce/retry wait, in-flight, and suppression clocks. */
 	let suggestTimer: ReturnType<typeof setTimeout> | null = null;
-	let suggestExpiry: ReturnType<typeof setTimeout> | null = null;
 	let suggestInFlight: AbortController | null = null;
 	let lastRunning = false;
-	let sawTurn = false;
+	let lastVisible = true;
 	let idleInput: { running: boolean; blank: boolean; visible: boolean; focused: boolean } = { running: false, blank: true, visible: true, focused: false };
 	let lastSuggestAt = 0;
 	let suggestSuppressUntil = 0;
 	let suggestCooldownUntil = 0;
 	let suggestDismissals = 0;
 	/**
-	 * A client hot reload replaces this module (and the store) while the Session
-	 * is already idle, so the running true→false edge that normally arms the
-	 * trigger is gone. The first focus of an empty composer in a non-blank
-	 * Session arms it once, which is also the moment a user expects a hint.
+	 * Failed attempts in the current idle episode. A suggestion that fails is
+	 * retried once, so one transient model/transport error cannot silently leave
+	 * an empty composer with no hint; a second failure stays quiet.
 	 */
-	let firstFocusArmed = false;
+	let suggestFailures = 0;
 
 	const state: FlowState = {
 		status: "idle",
@@ -796,10 +793,24 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 
 	// --- next-message suggestion (P0, empty draft only) ----------------------
 	//
-	// A row above the composer proposes the user's likely next message. It is
-	// never written into the draft implicitly: accept writes exactly once and
-	// never submits. The trigger is the running true→false edge reported by the
-	// slot; the store owns debounce, single-flight, CAS, suppression, and TTL.
+	// A suggestion proposes the user's likely next message inside the empty
+	// composer. It is never written into the draft implicitly: accept writes
+	// exactly once and never submits. The store owns scheduling, single-flight,
+	// CAS, suppression, and the one retry a failure earns.
+	//
+	// Scheduling invariants (each one was a live "有时不出现提示" report):
+	//
+	//   - a turn ending always arms an attempt, even while the 10s rate clock
+	//     still runs; the attempt is re-scheduled for the moment the clock
+	//     expires instead of being dropped forever;
+	//   - a shown suggestion has no expiry timer. It stays until the user types,
+	//     sends, switches Session, accepts, or closes it — silently removing the
+	//     hint after 60s reads as the bug "回复完等了一会，输入框没有提示";
+	//   - one failed request (transport, host failure, empty model output) is
+	//     retried once; a repeated failure stays quiet;
+	//   - focusing an idle, non-blank, empty composer, and returning to a visible
+	//     tab, both re-arm scheduling, which also recovers a store rebuilt by a
+	//     client hot reload.
 	const SUGGEST_DEBOUNCE_MS = 700;
 	const SUGGEST_MIN_INTERVAL_MS = 10_000;
 	const SUGGEST_SUPPRESS_MS = 60_000;
@@ -808,9 +819,7 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 
 	const clearSuggestTimers = (): void => {
 		if (suggestTimer !== null) clearTimeout(suggestTimer);
-		if (suggestExpiry !== null) clearTimeout(suggestExpiry);
 		suggestTimer = null;
-		suggestExpiry = null;
 	};
 
 	const abortSuggestRequest = (): void => {
@@ -831,34 +840,73 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		if (state.suggestStatus !== "none" || state.suggestion !== "") patch({ ...NO_SUGGEST });
 	};
 
-	const suggestionWanted = (): boolean => {
-		if (!sawTurn) return false;
+	/** Everything a suggestion needs except the rate and suppression clocks. */
+	const suggestionEligible = (): boolean => {
 		if (idleInput.running || idleInput.blank || !idleInput.visible) return false;
 		if (state.suggestStatus !== "none" || state.status !== "idle") return false;
 		const facts = state.facts;
 		if (facts.draft.trim() !== "" || facts.phase !== "plain") return false;
-		if (facts.refCount > 0 || facts.attachmentCount > 0) return false;
+		return facts.refCount === 0 && facts.attachmentCount === 0;
+	};
+
+	const suggestionWanted = (): boolean => {
+		if (!suggestionEligible()) return false;
 		const now = Date.now();
 		if (now < suggestSuppressUntil || now < suggestCooldownUntil) return false;
 		return now - lastSuggestAt >= SUGGEST_MIN_INTERVAL_MS;
 	};
 
-	const scheduleSuggestion = (): void => {
-		if (suggestTimer !== null || !suggestionWanted()) return;
+	/** Queue the one pending attempt, or do nothing when one is already waiting. */
+	const armSuggestTimer = (delay: number): void => {
+		if (suggestTimer !== null) return;
 		suggestTimer = setTimeout(() => {
 			suggestTimer = null;
-			// Re-check at fire time: the composer may have changed during the debounce.
+			// Re-check at fire time: the composer may have changed during the wait.
 			if (suggestionWanted()) void requestSuggestion();
-		}, SUGGEST_DEBOUNCE_MS);
+		}, delay);
+	};
+
+	/**
+	 * Plan the next suggestion attempt.
+	 *
+	 * The only clock worth chasing is the 10s rate limit: the attempt is simply
+	 * rescheduled for the moment it expires. A dismissal's suppression and the
+	 * repeated-dismissal cooldown are the user's explicit "not now" and are never
+	 * chased; the next turn, focus, or visibility change re-arms them.
+	 */
+	const scheduleSuggestion = (delay: number = SUGGEST_DEBOUNCE_MS): void => {
+		if (suggestTimer !== null || !suggestionEligible()) return;
+		const now = Date.now();
+		if (now < suggestSuppressUntil || now < suggestCooldownUntil) return;
+		const wait = lastSuggestAt + SUGGEST_MIN_INTERVAL_MS - now;
+		armSuggestTimer(wait > 0 ? wait : Math.max(0, delay));
 	};
 
 	const requestSuggestion = async (): Promise<void> => {
+		if (suggestInFlight !== null || state.suggestStatus !== "none") return;
 		const rev = state.facts.draftRev;
 		const controller = new AbortController();
 		suggestInFlight = controller;
 		lastSuggestAt = Date.now();
 		suggestDebug("requesting suggestion", { sessionId: scope.sessionId, rev });
 		patch({ suggestStatus: "loading", suggestion: "", suggestRev: rev });
+		/**
+		 * Read the live slice state. `patch()` mutates `state` behind TypeScript's
+		 * back, so a narrowed property read from before an await is not evidence.
+		 */
+		const suggestStatusNow = (): SuggestStatus => state.suggestStatus;
+		/**
+		 * Settle one failed attempt: reset the slice, and retry once at the rate
+		 * clock's next opening. A second failure stays quiet.
+		 */
+		const fail = (reason: string): void => {
+			if (suggestInFlight === controller) suggestInFlight = null;
+			if (suggestStatusNow() === "loading") patch({ suggestStatus: "none", suggestion: "", suggestRev: 0 });
+			const retry = suggestFailures < 1;
+			if (retry) suggestFailures += 1;
+			suggestDebug("suggestion failed", { reason, retry });
+			if (retry) scheduleSuggestion();
+		};
 		let result: EnhanceResult;
 		try {
 			const response = await fetch(ROUTE, {
@@ -872,56 +920,46 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 				signal: controller.signal
 			});
 			if (!response.ok) {
-				if (suggestInFlight === controller) {
-					suggestInFlight = null;
-					dropSuggestion();
-				}
+				fail(`http-${response.status}`);
 				return;
 			}
 			result = await response.json() as EnhanceResult;
 		} catch {
-			// Suggestion generation is best-effort and silent: an old host answers
+			// Suggestion generation is best-effort: an old host answers
 			// `bad-request` for the unknown stage, and that must look like "no row".
-			if (suggestInFlight === controller) {
-				suggestInFlight = null;
-				dropSuggestion();
-			}
+			fail("transport");
 			return;
 		}
 		if (suggestInFlight !== controller) return;
 		suggestInFlight = null;
-		if (state.suggestStatus !== "loading") return;
+		if (suggestStatusNow() !== "loading") return;
 		const facts = state.facts;
 		if (facts.draft.trim() !== "" || facts.draftRev !== rev || facts.phase !== "plain" || idleInput.running) {
 			dropSuggestion();
 			return;
 		}
 		if (result.ok !== true) {
-			suggestDebug("suggestion request failed", { reason: result.reason, message: result.message });
-			dropSuggestion();
+			fail(result.reason ?? "host-failure");
 			return;
 		}
 		const text = normalizeSuggestion(result.suggestion);
 		if (text === "") {
-			suggestDebug("suggestion returned empty");
-			dropSuggestion();
+			fail("empty-result");
 			return;
 		}
+		suggestFailures = 0;
 		suggestDebug("suggestion shown", { text });
 		patch({ suggestStatus: "shown", suggestion: text, suggestRev: rev });
-		if (suggestExpiry !== null) clearTimeout(suggestExpiry);
-		suggestExpiry = setTimeout(() => {
-			suggestExpiry = null;
-			if (state.suggestStatus === "shown") dropSuggestion();
-		}, SUGGESTION_TTL_MS);
 	};
 
 	const observeIdle = (input: { running: boolean; blank: boolean; visible: boolean; focused: boolean }): void => {
 		const turned = lastRunning && !input.running;
+		const returned = input.visible && !lastVisible;
 		lastRunning = input.running;
+		lastVisible = input.visible;
 		idleInput = input;
 		if (turned) {
-			sawTurn = true;
+			suggestFailures = 0;
 			suggestDebug("turn ended", { running: false, blank: input.blank });
 		}
 		if (input.running) {
@@ -933,14 +971,10 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 			dropSuggestion();
 			return;
 		}
-		// Hot-reload / first-mount recovery: arm the trigger once on the first
-		// focused idle composer of a Session that already contains history.
-		if (!sawTurn && !firstFocusArmed && input.focused && !input.blank) {
-			firstFocusArmed = true;
-			sawTurn = true;
-			suggestDebug("armed by first focus (idle, non-blank session)", { blank: input.blank });
-		}
-		scheduleSuggestion();
+		// The turn edge is the main arming event; focus and a restored tab are the
+		// recovery paths for a hint that was never requested or was lost to a
+		// reload. All three are safe to call often: scheduling self-checks.
+		if (turned || returned || input.focused) scheduleSuggestion();
 	};
 
 	const refreshIdle = (): void => observeIdle(idleInput);
@@ -995,7 +1029,6 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 
 	const suspend = (): void => {
 		dropSuggestion();
-		sawTurn = false;
 		lastRunning = false;
 	};
 

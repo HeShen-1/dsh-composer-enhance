@@ -58,21 +58,40 @@ host 与 client 之间**唯一**的接口契约。两边都必须照此实现；
   "assumptions": ["未确认但按默认处理的点"],
 
   // —— 本次实际用了哪些上下文（M3 起在 UI 上显示）——
-  "contextUsed": ["systemPrompt", "recentTurns", "projectMemory", "memoryGraph"],
+  "contextUsed": ["systemPrompt", "recentTurns", "projectMemory", "runtimeContext", "environment"],
 
   "route": { "provider": "…", "model": "…", "reasoningEffort": "…" }
 }
 ```
 
+### 环境清单接地（fast 阶段，gate + rewrite 共用）
+
+`test/handler-smoke.mjs` 与 `test/environment-smoke.mjs` 钉住的回归：草稿
+`使用dsh-mnemon插件工具记录项目情况，然后把 /karpathy-guidelines 保存到AGENTS.md；`
+曾被闸门当成「/karpathy-guidelines 是什么」来反问——模型不知道它是已安装的技能，只能当文件路径猜。
+
+- host 在 `stage:fast` 时从三个活服务读清单，**只塞给 gate 与 rewrite**（suggest 不付这份钱）：
+  - `ctx.skills.list({ cwd })`：技能名 + 一句话描述（每条描述截 60 字，整行上限 2400 字）；
+  - `ctx.commands.list(agent)`：斜杠命令名 + 描述（截 40 字，整行上限 700 字；拿不到 agent 就跳过）；
+  - `ctx.pluginManager.listPlugins()`：启用中的插件 moduleName（整行上限 900 字；禁用项跳过）。
+- 渲染成 `【当前 DSH 环境（已安装的真实实体，不是文件路径）】` + `- 技能：…` / `- 斜杠命令：…` / `- 插件：…`；
+  任一类为空就不出那一行，三类都空就整块不出现（部署缺服务时静默降级，不影响请求）。
+- 闸门 prompt 增加硬规则：清单里的名字是真实实体，草稿提到它们时按对应实体理解，**禁止**追问
+  「这是什么」；这类引用本身不构成歧义，只有同一个名字可能指两个不同事物、或处理动作不明确时才问。
+- 响应 `contextUsed` 增加 `"environment"`。
+
 ### suggest 阶段（Web 建议条 P0）
 
 - 触发方：客户端在「一轮回复结束（`running` true→false）+ 草稿为空 + 非 blank 会话 + 页面可见」时请求；
-  host 只负责生成，不判断触发条件。
+  host 只负责生成，不判断触发条件。恢复路径：聚焦空的 composer、切回可见标签页也会重新触发；
+  被 10s 最小间隔挡住时会**排到间隔到期再请求**，不是直接丢弃。
 - 请求：`{ "sessionId": "…", "stage": "suggest", "draft": "" }`；**非空 draft 一律 400 bad-request**。
 - 用最近对话 + 人设/项目约定接地，模型只输出一条文本；host 侧 `normalizeSuggestion()` 去掉围栏、引号、
   「建议：」前缀、折行，并截断到 160 字。空结果返回 `ok:false, reason:"empty-result"`。
 - 客户端只在响应返回时草稿仍为空、`draftRev` 未变、`running === false` 时显示；否则丢弃。
   采纳只写草稿（一次 `insertText`，不发送）；拒绝/打字/发送/切会话/隐藏页面都会作废它。
+- 失败（传输/HTTP/`ok:false`/空结果）**重试一次**；第二次失败才彻底安静。显示中的建议**没有 TTL**：
+  它一直留到用户输入、发送、采纳、关闭或切换会话（0.2.0 的 60s 到期被实测读成「等一会提示就没了」的 bug）。
 
 `ok:false` 时：
 
@@ -131,4 +150,5 @@ host 遇到非空 `answers` 时**直接改写、不再过闸门**，所以不存
 | 慢轨自动替换窗口 | 30s（且草稿仍聚焦、未被编辑、issues 非空、文本确有变化）。8s 在真机上把自动替换这条分支实际关掉了：`effort: max` 实测延迟 1.2s–9.5s |
 | 慢轨触发条件 | **仅当本轮闸门确实问过**（客户端 `rounds > 0`，即走过 chips 或 panel）。真机 4 次复核的 issues 是 0/0/2/0——对无歧义草稿做复核多数时候没话说，不值得每次 ✨ 都付一次 `effort: max` |
 | 建议文本上限 | 160 字（host `MAX_SUGGESTION_CHARS`；客户端显示一行，2 行截断） |
-| 建议生成间隔 | 触发后 700ms 防抖；两次请求最小间隔 10s；显式拒绝后静默 60s；连续拒绝 5 次冷却 10 分钟；显示 TTL 60s |
+| 建议生成间隔 | 触发/聚焦/回到可见页后 700ms 防抖；两次请求最小间隔 10s（被挡住的尝试会排到到期再发，不丢弃）；显式拒绝后静默 60s；连续拒绝 5 次冷却 10 分钟；显示无 TTL，留到用户操作 |
+| 环境清单上限 | 技能 2400 字（描述每条 ≤60 字）、斜杠命令 700 字（≤40 字）、插件 900 字；只注入 fast 阶段 |
