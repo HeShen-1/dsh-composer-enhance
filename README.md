@@ -187,6 +187,19 @@ host 半部每次请求都会回一个 `engine` 字段（当前 `0.2.2-m1`）—
 
 ---
 
+## 更新记录
+
+- **0.2.0**（2026-10-20）
+  - 新增**下一步建议**：host `stage:"suggest"`（空草稿、一条消息、160 字上限）+ 输入框内灰色 ghost；
+    `Tab`/点击采纳只写草稿、**不自动发送**；拒绝/打字/发送/切会话即作废，含防抖、单飞、冷却与 TTL。
+  - 修复 **no-route 模型路由**：按真实 dsh 0.2.1 契约解析（config → 活 Session 的 `modelSelection`
+    投影 → `ctx.agentDefaultModel.currentSelection()`）。
+  - 修复**会话接地丢 user 轮次**：`user/message` 的消息在 `data` 本体。
+  - 修复 client HMR 旧样式表不刷新；ghost 不再用主题 token 铺底（隐藏
+    `[data-composer-placeholder]`，亮/暗主题都只有灰字）。
+  - 147 项离线冒烟测试、`tsc --noEmit` 全绿。
+- **0.1.0**：✨ 按钮 + 歧义闸门（chips/面板）+ 快慢双轨改写 + 改动清单/一键还原。
+
 ## 许可证
 
 MIT

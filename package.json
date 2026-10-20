@@ -1,6 +1,6 @@
 {
   "name": "dsh-composer-enhance",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Native DeepSeek Harness web plugin: a ✨ button in the composer that grounds a draft in session context, asks only about genuine ambiguity, rewrites the draft in place with a change list, then refines it on a slower second pass.",
   "keywords": [
     "deepseek-harness",
