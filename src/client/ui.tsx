@@ -655,12 +655,15 @@ export function SuggestGhost(props: SlotProps) {
 		};
 	}, []);
 
+	// The ghost is the ONLY surface for a live suggestion while the draft is
+	// empty: showing the row above first and morphing it into the box on focus
+	// made the feature feel like two different widgets (and the row shifted the
+	// composer). The row remains only as a fallback when this ghost cannot render.
 	const visible = state.suggestStatus === "shown"
 		&& state.status === "idle"
 		&& draft === ""
 		&& phase === "plain"
 		&& attachmentCount === 0
-		&& focused
 		&& !composing;
 
 	// Tell the dock whether the ghost is actually on screen, so a missing overlay
@@ -725,45 +728,41 @@ export function SuggestGhost(props: SlotProps) {
 		textOverflow: "ellipsis",
 		paddingRight: 78
 	};
-	const keyStyle: CSSProperties = {
-		position: "absolute",
-		top: 2,
-		right: 30,
-		pointerEvents: "auto"
-	};
-	const closeStyle: CSSProperties = {
-		position: "absolute",
-		top: 2,
-		right: 4,
-		pointerEvents: "auto"
-	};
 	return (
-		<div ref={rootRef} className="dshce-ghost" data-dshce="ghost" style={ghostStyle}>
+		<div
+			ref={rootRef}
+			className="dshce-ghost"
+			data-dshce="ghost"
+			data-focused={focused ? "true" : "false"}
+			role="status"
+			aria-live="polite"
+			style={ghostStyle}
+		>
 			<span className="dshce-ghostText" style={ghostTextStyle}>{state.suggestion}</span>
-			<button
-				type="button"
-				className="dshce-ghostKey"
-				style={keyStyle}
-				aria-keyshortcuts="Tab"
-				data-dshce="ghost-accept"
-				onMouseDown={(event) => event.preventDefault()}
-				onClick={() => {
-					if (store.acceptSuggestion()) focusComposerIfNeeded();
-				}}
-			>
-				Tab
-			</button>
-			<button
-				type="button"
-				className="dshce-ghostKey"
-				style={closeStyle}
-				aria-label={t.suggestDismiss}
-				data-dshce="ghost-dismiss"
-				onMouseDown={(event) => event.preventDefault()}
-				onClick={() => store.dismissSuggestion()}
-			>
-				×
-			</button>
+			<span className="dshce-ghostActions">
+				<button
+					type="button"
+					className="dshce-ghostAction"
+					aria-keyshortcuts="Tab"
+					data-dshce="ghost-accept"
+					onMouseDown={(event) => event.preventDefault()}
+					onClick={() => {
+						if (store.acceptSuggestion()) focusComposerIfNeeded();
+					}}
+				>
+					Tab
+				</button>
+				<button
+					type="button"
+					className="dshce-ghostAction"
+					aria-label={t.suggestDismiss}
+					data-dshce="ghost-dismiss"
+					onMouseDown={(event) => event.preventDefault()}
+					onClick={() => store.dismissSuggestion()}
+				>
+					×
+				</button>
+			</span>
 		</div>
 	);
 }
@@ -908,10 +907,10 @@ export function EnhanceDock(props: SlotProps) {
 			/>
 		);
 	}
-	// The row is the fallback surface: unfocused, OR focused while the ghost is
-	// not actually rendering (overlay occupant missing/hidden). This guarantees a
-	// live suggestion is never invisible.
-	if (status === "idle" && state.suggestStatus === "shown" && (!focused || !state.ghostReady)) {
+	// The row is now ONLY a fallback: the in-box ghost is the primary surface.
+	// It appears here when the ghost cannot render (missing overlay occupant), so
+	// a live suggestion is still never invisible.
+	if (status === "idle" && state.suggestStatus === "shown" && !state.ghostReady) {
 		return (
 			<SuggestionRow
 				text={state.suggestion}

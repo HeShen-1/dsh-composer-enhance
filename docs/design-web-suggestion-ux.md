@@ -9,9 +9,11 @@
 > Tab 拦截与点击同路径，不自动发送；防抖/单飞/抑制/冷却/TTL 在 store 里。真机 host 已返回
 > `engine:"0.2.2-m1"` 且建议内容贴合最近对话；P0 建议条与 Tab 采纳已由用户页面确认。
 >
-> **P1 已实现（2026-10-19）**：`conversation.input.overlay` 内联灰色 ghost，composer 聚焦时显示、
-> 失焦时退回建议条；几何量测 `[data-composer-card]` + `contenteditable`，卡背景色遮住 placeholder，
-> 单行截断，Tab/键帽采纳与 P0 同一条路径。
+> **P1 已实现并收敛（2026-10-19/20）**：`conversation.input.overlay` 内联灰色 ghost，**作为建议的唯一主表面**
+> （失焦时也显示，不再先出上方条再切进框）；静止态只有灰字，聚焦后 `Tab`/`×` 淡入，160ms 淡入、
+> 右缘 mask 渐变淡出、尊重 reduced-motion。几何量测 `[data-composer-card]` + `contenteditable`，
+> 卡背景色遮住 placeholder，单行截断，Tab/键帽采纳与 P0 同一条路径；上方建议条降级为
+> `ghostReady=false` 时的兜底。
 
 ---
 
