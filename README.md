@@ -21,8 +21,10 @@ DeepSeek Harness Web 的**输入框提示词增强**插件。
 建议**只以输入框内的灰色 ghost 呈现**（不再先在上方出现一条再切进框里）：草稿为空时直接替换
 placeholder 的位置，静止态就是一行灰字；聚焦后尾部淡入 `Tab` 与 `×`，160ms 淡入、右缘渐变淡出、
 尊重 `prefers-reduced-motion`。实现用 `conversation.input.overlay` 视觉层，几何位置从公开的
-`[data-composer-card]` + `contenteditable` 根节点量测，并用卡背景色盖住 shell 自带 placeholder；
-绝对定位层不参与布局，所以 ghost 只显示一行，完整建议可用 Tab/点击直接采纳。上方建议条只在
+`[data-composer-card]` + `contenteditable` 根节点量测；**不画任何背景**，而是通过 shell 公开的
+`[data-composer-placeholder]` 属性临时隐藏自带 placeholder，显示时只留灰色文本（颜色取
+`--dsw-alias-label-caption`，亮/暗主题自动跟随）。绝对定位层不参与布局，所以 ghost 只显示一行，
+完整建议可用 Tab/点击直接采纳。上方建议条只在
 ghost 无法挂载时作为兜底出现（`ghostReady=false`）。
 
 设计依据与限制见 [docs/design-web-suggestion-ux.md](docs/design-web-suggestion-ux.md)。

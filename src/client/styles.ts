@@ -64,7 +64,7 @@ const CSS = [
 	// the composer's overlay layer. The opaque card-background patch is what
 	// hides the shell's own placeholder underneath; one line only, because the
 	// card does not grow for an absolutely positioned layer.
-	".dshce-ghost{position:absolute;right:8px;z-index:1;pointer-events:none;color:var(--dsw-alias-label-caption);background:var(--dsw-specific-input-major);white-space:nowrap;overflow:hidden;animation:dshce-ghost-in 160ms ease-out}",
+	".dshce-ghost{position:absolute;right:8px;z-index:1;pointer-events:none;color:var(--dsw-alias-label-caption);white-space:nowrap;overflow:hidden;animation:dshce-ghost-in 160ms ease-out}",
 	"@keyframes dshce-ghost-in{from{opacity:0;transform:translateY(2px)}to{opacity:1;transform:none}}",
 	"@media (prefers-reduced-motion:reduce){.dshce-ghost{animation:none}}",
 	// The right edge fades instead of hard-ellipsizing: the ghost reads as a hint,

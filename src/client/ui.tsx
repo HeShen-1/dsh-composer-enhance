@@ -693,6 +693,19 @@ export function SuggestGhost(props: SlotProps) {
 			setGeometry({ top: editorRect.top - anchorRect.top + 4, left: editorRect.left - anchorRect.left + 14 });
 		};
 		measure();
+		// Hide the shell's own placeholder through its published attribute instead
+		// of painting a card-coloured patch behind the ghost. A patch tied to one
+		// theme token showed as a foreign grey band in the dark theme; hiding the
+		// placeholder keeps the ghost as pure text under every theme.
+		const placeholder = card?.querySelector("[data-composer-placeholder]");
+		let restorePlaceholder: (() => void) | null = null;
+		if (placeholder instanceof HTMLElement) {
+			const previous = placeholder.style.visibility;
+			placeholder.style.visibility = "hidden";
+			restorePlaceholder = () => {
+				placeholder.style.visibility = previous;
+			};
+		}
 		const observer = new ResizeObserver(measure);
 		observer.observe(anchor);
 		observer.observe(editor);
@@ -700,6 +713,7 @@ export function SuggestGhost(props: SlotProps) {
 		return () => {
 			observer.disconnect();
 			window.removeEventListener("resize", measure);
+			restorePlaceholder?.();
 		};
 	}, [visible]);
 
@@ -718,7 +732,6 @@ export function SuggestGhost(props: SlotProps) {
 		whiteSpace: "nowrap",
 		overflow: "hidden",
 		lineHeight: "inherit",
-		background: "var(--dsw-specific-input-major)",
 		color: "var(--dsw-alias-label-caption)"
 	};
 	const ghostTextStyle: CSSProperties = {
