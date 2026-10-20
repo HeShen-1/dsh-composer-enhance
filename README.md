@@ -6,6 +6,21 @@ DeepSeek Harness Web 的**输入框提示词增强**插件。
 
 它是**原生 DSH 插件**：TypeScript 源码 + 构建产物、`dsh.client` 声明、`cordis.patch.yml` bundle 层、用 `plugin_manager` 安装与启停。不手改 profile、不建 symlink。
 
+---
+
+## 效果
+
+空草稿时，一轮对话结束会出现一条「下一步建议」，直接以**灰色 ghost 文本**显示在输入框里（不占位、不自动发送）。
+聚焦后右侧淡入 `Tab` / `×`：`Tab` 或点击采纳，文本写进草稿，是否发送由你决定。
+
+| 深色主题（聚焦：显示 Tab / ×） | 浅色主题（静止：纯灰字） |
+|---|---|
+| ![深色主题下输入框内的下一步建议 ghost](docs/screenshots/suggestion-dark.png) | ![浅色主题下输入框内的下一步建议 ghost](docs/screenshots/suggestion-light.png) |
+
+> 效果图按插件真实样式 + DSH 暗/亮主题 token 无头渲染，非截图拼接；ghost 不画背景，亮暗主题都只有文字变灰。
+
+---
+
 ### 下一步建议（Web 端 P0）
 
 空草稿时，一轮回复结束（Session `running` true→false）且页面可见，插件会请求一条「你接下来最可能发的一条消息」，
@@ -36,6 +51,9 @@ ghost 无法挂载时作为兜底出现（`ghostReady=false`）。
 ```bash
 # 在 DSH 里（Creator 模式）
 plugin_manager  install_bundle  <本仓库 git 地址 或 本目录绝对路径>
+
+# 或者用 CLI（等价于在 web profile 里 pnpm add）
+dsh plugin --profile web add github:HeShen-1/dsh-composer-enhance
 ```
 
 安装后出现在 profile 的 `dsh.profile.bundles` 里，可在侧边栏 **插件** 页或 `plugin_manager set_bundle` 里停用/启用。
@@ -202,4 +220,7 @@ host 半部每次请求都会回一个 `engine` 字段（当前 `0.2.2-m1`）—
 
 ## 许可证
 
-MIT
+[MIT](LICENSE) © 2026 HeShen-1 and dsh-composer-enhance contributors。
+
+第三方独立项目，与 DeepSeek 官方无隶属关系；「DeepSeek」「DeepSeek Harness」等名称与商标归其权利人所有。
+插件源码可自由使用、修改、再分发，保留版权与许可声明即可。

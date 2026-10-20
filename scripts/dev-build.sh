@@ -15,7 +15,7 @@ BUILD="${DSHCE_BUILD:-$HOME/work/dshce-build}"
 
 mkdir -p "$BUILD"
 rm -rf "$BUILD/src" "$BUILD/scripts"
-for item in src scripts package.json tsconfig.json cordis.patch.yml README.md .gitignore; do
+for item in src scripts package.json tsconfig.json cordis.patch.yml README.md LICENSE .gitignore; do
 	[ -e "$SRC/$item" ] && cp -R "$SRC/$item" "$BUILD/"
 done
 
