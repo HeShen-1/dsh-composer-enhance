@@ -69,10 +69,16 @@ const CSS = [
 	"@media (prefers-reduced-motion:reduce){.dshce-ghost{animation:none}}",
 	// The right edge fades instead of hard-ellipsizing: the ghost reads as a hint,
 	// not as text that was cut off.
-	".dshce-ghostText{display:block;padding-right:78px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;-webkit-mask-image:linear-gradient(to right,#000 calc(100% - 64px),transparent);mask-image:linear-gradient(to right,#000 calc(100% - 64px),transparent)}",
+	".dshce-ghostText{display:block;padding-right:112px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;-webkit-mask-image:linear-gradient(to right,#000 calc(100% - 64px),transparent);mask-image:linear-gradient(to right,#000 calc(100% - 64px),transparent)}",
 	// Actions stay hidden until the composer owns focus, so the resting state is
 	// pure gray text (like Claude Code); clicking in reveals Tab/× with a fade.
 	".dshce-ghostActions{position:absolute;top:2px;right:4px;display:flex;align-items:center;gap:4px;pointer-events:none}",
+	// Tab / regenerate / dismiss. The regenerate button is icon-only so the
+	// one-line row stays thin; it inherits the same focus fade as Tab and ×.
+	".dshce-ghostRegenerate{display:grid;place-items:center;padding:0 4px}",
+	".dshce-ghostRegenerate svg{display:block}",
+	".dshce-ghostAction:disabled{opacity:.55;cursor:default}",
+	".dshce-ghost[data-focused=true] .dshce-ghostAction:disabled{pointer-events:none}",
 	".dshce-ghostAction{pointer-events:none;opacity:0;cursor:pointer;padding:0 4px;border:.5px solid var(--dsw-alias-border-l1);border-radius:4px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-tertiary);font-family:inherit;font-size:11px;line-height:16px;transition:opacity 140ms ease}",
 	".dshce-ghost[data-focused=true] .dshce-ghostActions{pointer-events:auto}",
 	".dshce-ghost[data-focused=true] .dshce-ghostAction{pointer-events:auto;opacity:1}",

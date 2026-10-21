@@ -14,6 +14,7 @@ import {
 	Checkbox,
 	IconCloseOutlineRegular,
 	IconLoadingOutlineRegular,
+	IconRefreshOutlineRegular,
 	IconSparkleRegular,
 	IconWarningOutlineRegular,
 	Input,
@@ -95,6 +96,8 @@ interface Copy {
 	suggestTitle: string;
 	suggestPrefix: string;
 	suggestAccept: string;
+	/** Regenerate the shown suggestion without losing the current one. */
+	suggestRegenerate: string;
 	suggestDismiss: string;
 	kinds: Record<string, string>;
 	reasons: Record<string, string>;
@@ -128,6 +131,7 @@ const COPY: Record<"en" | "zh", Copy> = {
 		suggestTitle: "Next message",
 		suggestPrefix: "Suggestion: ",
 		suggestAccept: "Use",
+		suggestRegenerate: "Regenerate suggestion",
 		suggestDismiss: "Dismiss suggestion",
 		kinds: { added: "added", clarified: "clarified", restructured: "restructured", assumption: "assumption" },
 		reasons: {
@@ -168,6 +172,7 @@ const COPY: Record<"en" | "zh", Copy> = {
 		suggestTitle: "下一步建议",
 		suggestPrefix: "建议：",
 		suggestAccept: "采用",
+		suggestRegenerate: "重新生成建议",
 		suggestDismiss: "关闭建议",
 		kinds: { added: "新增", clarified: "明确", restructured: "重组", assumption: "假设" },
 		reasons: {
@@ -659,7 +664,11 @@ export function SuggestGhost(props: SlotProps) {
 	// empty: showing the row above first and morphing it into the box on focus
 	// made the feature feel like two different widgets (and the row shifted the
 	// composer). The row remains only as a fallback when this ghost cannot render.
-	const visible = state.suggestStatus === "shown"
+	// A manual regenerate keeps `loading` while the old text stays in place, so
+	// the ghost must stay visible for it; the automatic path clears the text, so
+	// its loading state is hidden by the same predicate.
+	const busy = state.suggestStatus === "loading";
+	const visible = (state.suggestStatus === "shown" || (busy && state.suggestion !== ""))
 		&& state.status === "idle"
 		&& draft === ""
 		&& phase === "plain"
@@ -739,7 +748,7 @@ export function SuggestGhost(props: SlotProps) {
 		whiteSpace: "nowrap",
 		overflow: "hidden",
 		textOverflow: "ellipsis",
-		paddingRight: 78
+		paddingRight: 112
 	};
 	return (
 		<div
@@ -747,8 +756,10 @@ export function SuggestGhost(props: SlotProps) {
 			className="dshce-ghost"
 			data-dshce="ghost"
 			data-focused={focused ? "true" : "false"}
+			data-loading={busy ? "true" : "false"}
 			role="status"
 			aria-live="polite"
+			aria-busy={busy}
 			style={ghostStyle}
 		>
 			<span className="dshce-ghostText" style={ghostTextStyle}>{state.suggestion}</span>
@@ -758,12 +769,27 @@ export function SuggestGhost(props: SlotProps) {
 					className="dshce-ghostAction"
 					aria-keyshortcuts="Tab"
 					data-dshce="ghost-accept"
+					disabled={busy}
 					onMouseDown={(event) => event.preventDefault()}
 					onClick={() => {
 						if (store.acceptSuggestion()) focusComposerIfNeeded();
 					}}
 				>
 					Tab
+				</button>
+				<button
+					type="button"
+					className="dshce-ghostAction dshce-ghostRegenerate"
+					aria-label={t.suggestRegenerate}
+					title={t.suggestRegenerate}
+					data-dshce="ghost-regenerate"
+					disabled={busy}
+					onMouseDown={(event) => event.preventDefault()}
+					onClick={() => store.regenerateSuggestion()}
+				>
+					{busy
+						? <span className="dshce-spin"><IconLoadingOutlineRegular size={14} /></span>
+						: <IconRefreshOutlineRegular size={14} />}
 				</button>
 				<button
 					type="button"

@@ -153,6 +153,8 @@ export interface FlowStore {
 	refreshIdle(): void;
 	/** Take the shown suggestion into the draft (CAS on `suggestRev`). */
 	acceptSuggestion(): boolean;
+	/** Ask the host for a fresh suggestion, keeping the current text while it runs. */
+	regenerateSuggestion(): void;
 	/** Drop the shown/loading suggestion and start (or extend) its suppression. */
 	dismissSuggestion(): void;
 	/** Stop suggestion work when the slot unmounts. */
@@ -248,6 +250,21 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 	 * an empty composer with no hint; a second failure stays quiet.
 	 */
 	let suggestFailures = 0;
+	/**
+	 * The last suggestion text, kept while the composer cannot show it.
+	 *
+	 * Typing hides the ghost but must not destroy the hint: when the user clears
+	 * the draft again, the same text comes back without another model call
+	 * ("用户删掉输入后，之前已生成的内容就没了" was the live report). A new turn,
+	 * an explicit close, or a successful regenerate are the only things that
+	 * replace or discard it.
+	 */
+	let archivedSuggestion = "";
+	/**
+	 * Monotonic request id. Cancellation bumps it so a late fetch settlement
+	 * cannot repaint state that a newer decision already replaced.
+	 */
+	let suggestSeq = 0;
 
 	const state: FlowState = {
 		status: "idle",
@@ -823,6 +840,7 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 	};
 
 	const abortSuggestRequest = (): void => {
+		suggestSeq += 1;
 		const controller = suggestInFlight;
 		suggestInFlight = null;
 		if (controller === null) return;
@@ -833,11 +851,35 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		}
 	};
 
-	/** Retire the suggestion (shown or loading) without touching the draft. */
-	const dropSuggestion = (): void => {
+	/** Hide the suggestion while KEEPING its text; clearing the draft restores it. */
+	const hideSuggestion = (): void => {
 		clearSuggestTimers();
 		abortSuggestRequest();
 		if (state.suggestStatus !== "none" || state.suggestion !== "") patch({ ...NO_SUGGEST });
+	};
+
+	/** Retire the suggestion for good (a new turn, or an explicit close). */
+	const discardSuggestion = (): void => {
+		archivedSuggestion = "";
+		hideSuggestion();
+	};
+
+	/**
+	 * Put the archived suggestion back on an empty, idle composer.
+	 *
+	 * Accept CAS's on the live draft revision, which changed while the user was
+	 * typing, so the restored row carries `facts.draftRev` instead of the archive
+	 * time's revision — the draft is empty, so writing the text is still safe.
+	 */
+	const restoreSuggestion = (): void => {
+		if (archivedSuggestion === "") return;
+		if (idleInput.running || state.suggestStatus !== "none" || suggestInFlight !== null) return;
+		if (state.status !== "idle") return;
+		const facts = state.facts;
+		if (facts.draft.trim() !== "" || facts.phase !== "plain" || facts.refCount > 0 || facts.attachmentCount > 0) return;
+		if (!idleInput.visible) return;
+		suggestDebug("suggestion restored", { length: archivedSuggestion.length });
+		patch({ suggestStatus: "shown", suggestion: archivedSuggestion, suggestRev: facts.draftRev });
 	};
 
 	/** Everything a suggestion needs except the rate and suppression clocks. */
@@ -882,26 +924,48 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		armSuggestTimer(wait > 0 ? wait : Math.max(0, delay));
 	};
 
-	const requestSuggestion = async (): Promise<void> => {
-		if (suggestInFlight !== null || state.suggestStatus !== "none") return;
+	/**
+	 * Ask the host for one suggestion.
+	 *
+	 * `auto` is the silent scheduler path (clears the row, earns one retry).
+	 * `manual` is the regenerate button: it bypasses the rate clock and keeps the
+	 * current text visible while the request runs, so a click never flashes the
+	 * hint away or leaves the user with nothing when the model fails.
+	 * @param mode - which caller owns this request.
+	 */
+	const requestSuggestion = async (mode: "auto" | "manual" = "auto"): Promise<void> => {
+		if (suggestInFlight !== null) return;
+		if (mode === "auto" && state.suggestStatus !== "none") return;
+		if (mode === "manual" && (state.suggestStatus !== "shown" || state.suggestion === "")) return;
+		const previous = state.suggestion;
 		const rev = state.facts.draftRev;
+		const seq = ++suggestSeq;
+		const alive = (): boolean => seq === suggestSeq;
 		const controller = new AbortController();
 		suggestInFlight = controller;
 		lastSuggestAt = Date.now();
-		suggestDebug("requesting suggestion", { sessionId: scope.sessionId, rev });
-		patch({ suggestStatus: "loading", suggestion: "", suggestRev: rev });
+		suggestDebug(mode === "manual" ? "regenerating suggestion" : "requesting suggestion", { sessionId: scope.sessionId, rev });
+		patch(mode === "manual"
+			? { suggestStatus: "loading", suggestRev: rev }
+			: { suggestStatus: "loading", suggestion: "", suggestRev: rev });
 		/**
-		 * Read the live slice state. `patch()` mutates `state` behind TypeScript's
-		 * back, so a narrowed property read from before an await is not evidence.
-		 */
-		const suggestStatusNow = (): SuggestStatus => state.suggestStatus;
-		/**
-		 * Settle one failed attempt: reset the slice, and retry once at the rate
-		 * clock's next opening. A second failure stays quiet.
+		 * Settle one failed attempt. Auto retries once at the rate clock's next
+		 * opening; manual keeps the previous text and stays quiet.
 		 */
 		const fail = (reason: string): void => {
+			if (!alive()) return;
 			if (suggestInFlight === controller) suggestInFlight = null;
-			if (suggestStatusNow() === "loading") patch({ suggestStatus: "none", suggestion: "", suggestRev: 0 });
+			if (mode === "manual") {
+				const facts = state.facts;
+				const valid = facts.draft.trim() === "" && facts.phase === "plain" && facts.draftRev === rev
+					&& !idleInput.running && facts.refCount === 0 && facts.attachmentCount === 0;
+				suggestDebug("regenerate failed", { reason });
+				patch(valid
+					? { suggestStatus: "shown", suggestion: previous, suggestRev: rev }
+					: { ...NO_SUGGEST });
+				return;
+			}
+			patch({ ...NO_SUGGEST });
 			const retry = suggestFailures < 1;
 			if (retry) suggestFailures += 1;
 			suggestDebug("suggestion failed", { reason, retry });
@@ -912,11 +976,9 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 			const response = await fetch(ROUTE, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
-				body: JSON.stringify({
-					sessionId: scope.sessionId ?? "",
-					stage: "suggest",
-					draft: ""
-				} satisfies EnhanceRequest),
+				body: JSON.stringify(mode === "manual"
+					? { sessionId: scope.sessionId ?? "", stage: "suggest", draft: "", previous } satisfies EnhanceRequest
+					: { sessionId: scope.sessionId ?? "", stage: "suggest", draft: "" } satisfies EnhanceRequest),
 				signal: controller.signal
 			});
 			if (!response.ok) {
@@ -930,25 +992,28 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 			fail("transport");
 			return;
 		}
-		if (suggestInFlight !== controller) return;
+		if (!alive()) {
+			if (suggestInFlight === controller) suggestInFlight = null;
+			return;
+		}
 		suggestInFlight = null;
-		if (suggestStatusNow() !== "loading") return;
 		const facts = state.facts;
-		if (facts.draft.trim() !== "" || facts.draftRev !== rev || facts.phase !== "plain" || idleInput.running) {
-			dropSuggestion();
+		const valid = facts.draft.trim() === "" && facts.draftRev === rev && facts.phase === "plain"
+			&& !idleInput.running && facts.refCount === 0 && facts.attachmentCount === 0;
+		if (!valid) {
+			// The composer moved on while the model was thinking: hide, keep the
+			// archive (the user's own edit is the reason the row cannot show).
+			patch({ suggestStatus: "none", suggestion: "", suggestRev: 0 });
 			return;
 		}
-		if (result.ok !== true) {
-			fail(result.reason ?? "host-failure");
-			return;
-		}
-		const text = normalizeSuggestion(result.suggestion);
+		const text = result.ok === true ? normalizeSuggestion(result.suggestion) : "";
 		if (text === "") {
-			fail("empty-result");
+			fail(result.ok === true ? "empty-result" : (result.reason ?? "host-failure"));
 			return;
 		}
 		suggestFailures = 0;
-		suggestDebug("suggestion shown", { text });
+		archivedSuggestion = text;
+		suggestDebug(mode === "manual" ? "suggestion regenerated" : "suggestion shown", { text });
 		patch({ suggestStatus: "shown", suggestion: text, suggestRev: rev });
 	};
 
@@ -963,14 +1028,19 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 			suggestDebug("turn ended", { running: false, blank: input.blank });
 		}
 		if (input.running) {
-			// Sending a message invalidates whatever the row was showing.
-			dropSuggestion();
+			// A new turn invalidates both the row and the archived text: the
+			// conversation it was generated from has moved on.
+			discardSuggestion();
 			return;
 		}
 		if (!input.visible) {
-			dropSuggestion();
+			// A hidden tab is not a decision: keep the archive for the return.
+			hideSuggestion();
 			return;
 		}
+		// Typing hid the row without discarding it; an empty composer gets it back
+		// before scheduling decides whether a fresh call is even needed.
+		restoreSuggestion();
 		// The turn edge is the main arming event; focus and a restored tab are the
 		// recovery paths for a hint that was never requested or was lost to a
 		// reload. All three are safe to call often: scheduling self-checks.
@@ -984,7 +1054,7 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		const rev = state.suggestRev;
 		const facts = state.facts;
 		if (facts.draft.trim() !== "" || facts.phase !== "plain" || facts.draftRev !== rev) {
-			dropSuggestion();
+			hideSuggestion();
 			return false;
 		}
 		const text = state.suggestion;
@@ -1007,12 +1077,14 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 			applied = false;
 		}
 		if (!applied) {
-			dropSuggestion();
+			hideSuggestion();
 			return false;
 		}
 		suggestDismissals = 0;
 		suggestSuppressUntil = 0;
-		dropSuggestion();
+		// Keep the archive: deleting the accepted text must bring the hint back
+		// (approved), and a sent message discards it anyway via `running`.
+		hideSuggestion();
 		return true;
 	};
 
@@ -1024,11 +1096,13 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 			suggestDismissals = 0;
 			suggestCooldownUntil = Date.now() + SUGGEST_COOLDOWN_MS;
 		}
-		dropSuggestion();
+		discardSuggestion();
 	};
 
 	const suspend = (): void => {
-		dropSuggestion();
+		// Unmount is not a decision either: switching Sessions and back restores
+		// the archived hint while the turn it belongs to is still the last one.
+		hideSuggestion();
 		lastRunning = false;
 	};
 
@@ -1086,6 +1160,9 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 		observeIdle,
 		refreshIdle,
 		acceptSuggestion,
+		regenerateSuggestion: () => {
+			void requestSuggestion("manual");
+		},
 		dismissSuggestion,
 		suspend,
 		setGhostReady,
@@ -1119,10 +1196,14 @@ export function createFlowStore(sessionId: string | undefined): FlowStore {
 				const stale = facts.draft.trim() !== "" || facts.draftRev !== state.suggestRev
 					|| facts.phase !== "plain" || facts.refCount > 0 || facts.attachmentCount > 0;
 				if (stale) {
-					dropSuggestion();
+					// Typing (or a reference/attachment) hides the row; the archive
+					// survives, and clearing the composer restores it below.
+					hideSuggestion();
+					restoreSuggestion();
 					return;
 				}
 			}
+			if (state.suggestStatus === "none") restoreSuggestion();
 			emit();
 		}
 	};

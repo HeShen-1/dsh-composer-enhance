@@ -158,8 +158,18 @@ ok("suggest: one model call", suggest.calls === 1);
 ok("suggest: ok with the suggest stage", suggest.body.ok === true && suggest.body.stage === "suggest");
 ok("suggest: response text is normalized", suggest.body.suggestion === "把安装章节改成只保留 pnpm 一种方式");
 ok("suggest: uses the suggest prompt", suggest.sent[0].system === P.SUGGEST_SYSTEM);
-ok("suggest: carries the build marker", suggest.body.engine === "0.3.0");
+ok("suggest: carries the build marker", suggest.body.engine === "0.3.1");
 ok("suggest: no draft or gate fields", suggest.body.draft === undefined && suggest.body.gate === undefined);
+
+// --- regenerate: the replaced text reaches the model ----------------------
+const regenerated = await run(
+	{ draft: "", sessionId: "", stage: "suggest", previous: "把安装章节改成只保留 pnpm" },
+	["把 README 的安装章节压缩成一节"]
+);
+ok("suggest regenerate: one model call", regenerated.calls === 1);
+ok("suggest regenerate: the previous text reaches the request", regenerated.sent[0].text.includes("把安装章节改成只保留 pnpm"));
+ok("suggest regenerate: the prompt asks for a different angle", regenerated.sent[0].text.includes("上一条建议"));
+ok("suggest regenerate: the reply is a suggestion", regenerated.body.ok === true && typeof regenerated.body.suggestion === "string");
 
 const emptySuggest = await run({ draft: "", sessionId: "", stage: "suggest" }, ["   "]);
 ok("suggest: empty model output is empty-result", emptySuggest.body.ok === false && emptySuggest.body.reason === "empty-result");
@@ -204,8 +214,8 @@ ok("env: the suggestion prompt omits the catalogs", !envSuggest.sent[0].text.inc
 ok("env: the suggestion reply reports no environment grounding", envSuggest.body.contextUsed.includes("environment") === false);
 
 // --- every successful reply carries the build marker -----------------------
-ok("build marker on gate reply", first.body.engine === "0.3.0");
-ok("build marker on rewrite reply", chipsReply.body.engine === "0.3.0");
+ok("build marker on gate reply", first.body.engine === "0.3.1");
+ok("build marker on rewrite reply", chipsReply.body.engine === "0.3.1");
 
 process.stdout.write(`handler-smoke: ${pass} passed, ${failures.length} failed\n`);
 for (const name of failures) process.stdout.write(`  FAIL ${name}\n`);

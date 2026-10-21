@@ -2,7 +2,7 @@
 
 dsh-composer-enhance —— DeepSeek Harness Web 的输入框提示词增强插件。
 
-- 测试：`pnpm test`（六个离线冒烟测试，共 207 项；不需要 DSH 运行时、不需要网络）
+- 测试：`pnpm test`（六个离线冒烟测试，共 236 项；不需要 DSH 运行时、不需要网络）
 - 构建：`pnpm run build`（`src/` → `lib/`，测试导入的是 `lib/`，改完源码先构建再测）
 - 类型：`pnpm run typecheck`
 - 流程状态：`.dev/PROJECT.md`（devflow 的 context 产物，写清测试命令与目录约定）

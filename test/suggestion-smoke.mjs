@@ -236,6 +236,130 @@ hidden.observeIdle({ running: false, blank: false, visible: true, focused: false
 await advance(700);
 ok("visibility: returning to the tab requests again", calls.length === 2);
 
+// --- case 11: typing hides, clearing restores, no second request ----------
+resetFetch();
+const kept = newStore();
+await advance(700);
+const keptText = kept.getSnapshot().suggestion;
+ok("restore: the first suggestion is shown", kept.getSnapshot().suggestStatus === "shown" && calls.length === 1);
+kept.sync({ ...facts, draft: "写了一半", draftRev: 1 });
+ok("restore: typing hides the suggestion", kept.getSnapshot().suggestStatus === "none");
+ok("restore: typing makes no extra request", calls.length === 1);
+kept.sync({ ...facts, draft: "", draftRev: 2 });
+ok("restore: clearing the draft brings the same text back", kept.getSnapshot().suggestStatus === "shown" && kept.getSnapshot().suggestion === keptText);
+ok("restore: the restored text costs no request", calls.length === 1);
+
+// --- case 12: accept, delete everything, get the same hint back -----------
+let inserted = "";
+let liveRev = 2;
+kept.bind({
+	sessionId: "session-1",
+	inputActions: {
+		captureInsertion: () => ({ start: 0, end: 0, draftRev: liveRev }),
+		insertText: (text) => {
+			inserted = text;
+			return true;
+		}
+	}
+});
+ok("restore: accept works after the draft revision changed", kept.acceptSuggestion() === true && inserted === keptText);
+kept.sync({ ...facts, draft: keptText, draftRev: 3 });
+ok("restore: the accepted text keeps the ghost hidden", kept.getSnapshot().suggestStatus === "none");
+liveRev = 4;
+kept.sync({ ...facts, draft: "", draftRev: 4 });
+ok("restore: deleting the accepted text brings the hint back", kept.getSnapshot().suggestStatus === "shown" && kept.getSnapshot().suggestion === keptText);
+inserted = "";
+ok("restore: the restored hint is acceptable again", kept.acceptSuggestion() === true && inserted === keptText);
+
+// --- case 13: a new turn discards the archive ----------------------------
+await advance(20_000);
+resetFetch();
+const fresh = newStore();
+await advance(700);
+const firstText = fresh.getSnapshot().suggestion;
+fresh.sync({ ...facts, draft: "随便写点", draftRev: 1 });
+fresh.sync({ ...facts, draft: "", draftRev: 2 });
+reply = async () => ({ ok: true, json: async () => ({ ok: true, suggestion: "第二轮建议" }) });
+fresh.observeIdle(running(true));
+fresh.observeIdle(running(false));
+// The previous request opened the 10s rate window; the fresh turn's attempt is
+// rescheduled for its expiry rather than dropped.
+await advance(10_000);
+ok("new turn: a fresh suggestion is requested", calls.length === 2);
+ok("new turn: the old text is replaced", fresh.getSnapshot().suggestion === "第二轮建议" && fresh.getSnapshot().suggestion !== firstText);
+fresh.sync({ ...facts, draft: "再写点", draftRev: 3 });
+fresh.sync({ ...facts, draft: "", draftRev: 4 });
+ok("new turn: clearing restores the NEW text, not the old one", fresh.getSnapshot().suggestion === "第二轮建议");
+await advance(20_000);
+
+// --- case 14: an explicit close discards the archive ---------------------
+resetFetch();
+const closed = newStore();
+await advance(700);
+closed.dismissSuggestion();
+closed.sync({ ...facts, draft: "临时", draftRev: 1 });
+closed.sync({ ...facts, draft: "", draftRev: 2 });
+ok("close: dismissing does not restore on an empty draft", closed.getSnapshot().suggestStatus === "none");
+await advance(60_000);
+ok("close: dismissing does not trigger a request later", calls.length === 1);
+
+// --- case 15: unmount/subscribe churn keeps the archive ------------------
+resetFetch();
+const switched = newStore();
+await advance(700);
+switched.suspend();
+ok("unmount: suspending hides the row", switched.getSnapshot().suggestStatus === "none");
+switched.observeIdle({ running: false, blank: false, visible: true, focused: false });
+ok("unmount: an empty composer restores it without a request", switched.getSnapshot().suggestStatus === "shown" && calls.length === 1);
+
+// --- case 16: regenerate keeps the old text while the model runs ---------
+resetFetch();
+const regen = newStore();
+await advance(700);
+const oldText = regen.getSnapshot().suggestion;
+let release;
+reply = () => new Promise((resolve) => {
+	release = () => resolve({ ok: true, json: async () => ({ ok: true, suggestion: "重新生成的建议" }) });
+});
+regen.regenerateSuggestion();
+await settle();
+ok("regenerate: one request is issued", calls.length === 2);
+ok("regenerate: the old text is sent so the host can answer differently", calls[1].body.previous === oldText);
+ok("regenerate: the old text stays visible while loading", regen.getSnapshot().suggestStatus === "loading" && regen.getSnapshot().suggestion === oldText);
+release();
+await settle();
+ok("regenerate: the new text replaces the old one", regen.getSnapshot().suggestStatus === "shown" && regen.getSnapshot().suggestion === "重新生成的建议");
+ok("regenerate: typing away and back restores the NEW text", (() => {
+	regen.sync({ ...facts, draft: "x", draftRev: 1 });
+	regen.sync({ ...facts, draft: "", draftRev: 2 });
+	return regen.getSnapshot().suggestion === "重新生成的建议";
+})());
+
+// --- case 17: a failed regenerate keeps the old text, no retry -----------
+resetFetch();
+const failed = newStore();
+await advance(700);
+const stillText = failed.getSnapshot().suggestion;
+calls = [];
+reply = async () => {
+	throw new Error("network down");
+};
+failed.regenerateSuggestion();
+await settle();
+ok("regenerate failure: the old text is kept", failed.getSnapshot().suggestStatus === "shown" && failed.getSnapshot().suggestion === stillText);
+ok("regenerate failure: exactly one attempt is made", calls.length === 1);
+await advance(60_000);
+ok("regenerate failure: no automatic retry follows", calls.length === 1);
+
+// --- case 18: regenerate bypasses the automatic rate clock ---------------
+resetFetch();
+const fast = newStore();
+await advance(700);
+// The automatic request just ran; a manual click must not wait out the 10s.
+fast.regenerateSuggestion();
+await settle();
+ok("regenerate: a manual click bypasses the 10s window", calls.length === 2);
+
 // --- report -------------------------------------------------------------
 globalThis.setTimeout = REAL_TIMEOUT;
 if (failures.length > 0) {

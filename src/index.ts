@@ -51,7 +51,7 @@ const DEFAULT_TIMEOUT_MS = 60_000;
  * to do nothing, this says whether the host answering the page is the build you
  * think it is.
  */
-const ENGINE = "0.3.0";
+const ENGINE = "0.3.1";
 
 /** Caps mirrored by docs/protocol.md; the client enforces the same numbers. */
 const MAX_QUESTIONS = 3;
@@ -393,6 +393,7 @@ const SUGGEST_SYSTEM = [
 	"4. 长度控制在 60 个字符以内（中文按字计），一行一条。",
 	"5. 不要解释、不要引号、不要 markdown、不要编号、不要「建议：」前缀。",
 	"6. 上下文不足以写出有价值的建议时，输出空字符串（什么都不输出），不要硬凑。",
+	"7. 如果输入里附了【上一条建议】，必须换一个角度或对象再写，不要复述或只做同义改写。",
 	"",
 	"只输出这一条消息的正文。"
 ].join("\n");
@@ -1120,11 +1121,18 @@ export function createHandler(ctx: PluginContext, state: ConfigState): RouteHand
 
 			// --- suggest stage: the user's likely next message --------------------
 			if (stage === "suggest") {
+				// A regenerate click carries the text it wants replaced; the model must
+				// not hand back the same sentence. The field is normalized through the
+				// same cap as the answer, so it cannot smuggle a long prompt in.
+				const previous = normalizeSuggestion(body.previous);
+				const regenerateNote = previous === ""
+					? ""
+					: `\n\n【上一条建议（必须换一个角度，不要重复）】\n${previous}`;
 				const output = await runModel(
 					ctx,
 					route,
 					config.suggestPrompt || SUGGEST_SYSTEM,
-					`${preamble}【任务】根据上面的对话，写用户接下来最可能发送的一条消息。`,
+					`${preamble}【任务】根据上面的对话，写用户接下来最可能发送的一条消息。${regenerateNote}`,
 					sessionId,
 					config.timeoutMs,
 					config.maxTokens

@@ -100,6 +100,8 @@ export interface EnhanceRequest {
 	baselineDraft?: string;
 	questions?: GateQuestion[];
 	answers?: Record<string, string[]>;
+	/** The suggestion the user asked to replace; the host must answer differently. */
+	previous?: string;
 	options?: { includeMemory: boolean };
 }
 
